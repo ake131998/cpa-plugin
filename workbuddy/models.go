@@ -78,7 +78,9 @@ func mergeEnterprise(storageJSON []byte, base []pluginapi.ModelInfo) []pluginapi
 	enterpriseID := ""
 	if len(storageJSON) > 0 {
 		if sa, err := parseStored(storageJSON); err == nil {
-			enterpriseID = strings.TrimSpace(sa.Account.EnterpriseID)
+			// JWT claim fallback included: accounts whose auth file lacks
+			// enterpriseId can still surface enterprise models from the token.
+			enterpriseID = enterpriseIDFor(sa)
 		}
 	}
 	entry, ok := cachedEnterpriseModels(enterpriseID)
@@ -339,7 +341,11 @@ func parseEnterpriseModels(raw []byte) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("enterprise models: unrecognized response shape")
 	}
 	if len(list) == 0 {
-		return nil, fmt.Errorf("enterprise models: empty list")
+		// A well-formed but empty list is a legitimate state — verified
+		// against the real upstream, which answers {"code":0,"data":[]} when
+		// the enterprise has no custom models configured. Not an error: the
+		// cached entry stays fresh with model_count 0.
+		return nil, nil
 	}
 	out := make([]pluginapi.ModelInfo, 0, len(list))
 	for _, item := range list {

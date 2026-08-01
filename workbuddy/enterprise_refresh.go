@@ -14,6 +14,7 @@
 package main
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,51 @@ import (
 var (
 	enterpriseRefreshStop chan struct{}
 	enterpriseRefreshMu   sync.Mutex
+
+	// enterpriseRefreshState tracks the last background run for the status
+	// endpoint and diagnostics.
+	enterpriseRefreshStateMu sync.RWMutex
+	enterpriseRefreshState   struct {
+		lastRun   time.Time
+		accounted int
+		fetched   int
+		failed    int
+		skipped   int
+	}
 )
+
+// enterpriseIDFor resolves the enterpriseId to use for one account:
+// the stored auth's enterpriseId first, then a zero-request fallback that
+// scans the access token's JWT claims (enterprise_id/org_id/tenant_id).
+// Many existing auth files predate the enterpriseId field (or the login-time
+// account fetch failed), so the JWT fallback is what lets those accounts pick
+// up enterprise models without waiting for a refresh.
+func enterpriseIDFor(sa *storedAuth) string {
+	if sa == nil {
+		return ""
+	}
+	if eid := strings.TrimSpace(sa.Account.EnterpriseID); eid != "" {
+		return eid
+	}
+	if tok := strings.TrimSpace(sa.Auth.AccessToken); tok != "" {
+		if eid, ok := enterpriseClaimFromJWT(tok); ok {
+			return eid
+		}
+	}
+	return ""
+}
+
+// enterpriseRefreshSummary is the per-run diagnostics row.
+func recordEnterpriseRefresh(accounted, fetched, failed, skipped int) {
+	enterpriseRefreshStateMu.Lock()
+	enterpriseRefreshState.lastRun = time.Now()
+	enterpriseRefreshState.accounted = accounted
+	enterpriseRefreshState.fetched = fetched
+	enterpriseRefreshState.failed = failed
+	enterpriseRefreshState.skipped = skipped
+	enterpriseRefreshStateMu.Unlock()
+	log.Printf("[workbuddy] enterprise models refresh: %d accounts, %d fetched, %d failed, %d skipped", accounted, fetched, failed, skipped)
+}
 
 // ensureEnterpriseRefreshLoop starts the background refresh loop once.
 // Idempotent: repeated configure()/register calls must not spawn duplicate
@@ -35,6 +80,7 @@ func ensureEnterpriseRefreshLoop() {
 		return // already running
 	}
 	enterpriseRefreshStop = make(chan struct{})
+	log.Printf("[workbuddy] enterprise models refresh loop started (every %v)", enterpriseModelsTTL)
 	go enterpriseRefreshLoop(enterpriseRefreshStop)
 }
 
@@ -62,9 +108,16 @@ func enterpriseRefreshLoop(stop chan struct{}) {
 func refreshEnterpriseModelsAll() {
 	files, err := hostAuthList()
 	if err != nil {
+		log.Printf("[workbuddy] enterprise models refresh: host.auth.list failed: %v", err)
 		return
 	}
-	var wg sync.WaitGroup
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		fetched int
+		failed  int
+		skipped int
+	)
 	sem := make(chan struct{}, 4)
 	for _, f := range files {
 		f := f
@@ -73,30 +126,48 @@ func refreshEnterpriseModelsAll() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			refreshEnterpriseModelsForAuth(f.AuthIndex)
+			switch refreshEnterpriseModelsForAuth(f.AuthIndex) {
+			case "fetched":
+				mu.Lock()
+				fetched++
+				mu.Unlock()
+			case "failed":
+				mu.Lock()
+				failed++
+				mu.Unlock()
+			default:
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+			}
 		}()
 	}
 	wg.Wait()
+	recordEnterpriseRefresh(len(files), fetched, failed, skipped)
 }
 
 // refreshEnterpriseModelsForAuth refreshes one account's enterprise model
 // cache. Failures are recorded via markEnterpriseModelsError (preserving the
-// previous list) and never abort other accounts.
-func refreshEnterpriseModelsForAuth(authIndex string) {
+// previous list) and never abort other accounts. Returns "fetched", "failed"
+// or "skipped" for the run summary.
+func refreshEnterpriseModelsForAuth(authIndex string) string {
 	sa, err := hostAuthGet(authIndex)
 	if err != nil {
-		return
+		return "skipped"
 	}
-	enterpriseID := strings.TrimSpace(sa.Account.EnterpriseID)
+	enterpriseID := enterpriseIDFor(sa)
 	if enterpriseID == "" || strings.TrimSpace(sa.Auth.AccessToken) == "" {
-		return
+		return "skipped"
 	}
 	models, err := callEnterpriseModelsAPI(sa.Auth.AccessToken, enterpriseID)
-	if err != nil || len(models) == 0 {
+	if err != nil {
 		markEnterpriseModelsError(enterpriseID, err)
-		return
+		log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refresh failed: %v", authIndex, enterpriseID, err)
+		return "failed"
 	}
 	storeEnterpriseModels(enterpriseID, models)
+	log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refreshed: %d models", authIndex, enterpriseID, len(models))
+	return "fetched"
 }
 
 // -----------------------------------------------------------------------------
@@ -141,10 +212,30 @@ func handleEnterpriseModelsStatus() map[string]any {
 		accounts = append(accounts, enterpriseStatusAccount{
 			AuthIndex:    f.AuthIndex,
 			Nickname:     sa.Account.Nickname,
-			EnterpriseID: strings.TrimSpace(sa.Account.EnterpriseID),
+			EnterpriseID: enterpriseIDFor(sa),
 		})
 	}
-	return buildEnterpriseModelsStatus(accounts)
+	resp := buildEnterpriseModelsStatus(accounts)
+	// Diagnostics: when the refresh loop has never run (or the account list
+	// changed), surface why — a missing WB_UPSTREAM_DUMP_DIR and an empty
+	// last_refresh_at usually mean "no account had an enterpriseId yet".
+	enterpriseRefreshStateMu.RLock()
+	lastRun := enterpriseRefreshState.lastRun
+	accounted := enterpriseRefreshState.accounted
+	fetched := enterpriseRefreshState.fetched
+	failed := enterpriseRefreshState.failed
+	skipped := enterpriseRefreshState.skipped
+	enterpriseRefreshStateMu.RUnlock()
+	resp["loop_started"] = enterpriseRefreshStop != nil
+	if !lastRun.IsZero() {
+		resp["last_refresh_at"] = lastRun.Format(time.RFC3339)
+		resp["last_refresh_accounts"] = accounted
+		resp["last_refresh_fetched"] = fetched
+		resp["last_refresh_failed"] = failed
+		resp["last_refresh_skipped"] = skipped
+	}
+	resp["dump_dir"] = loadedUpstreamDumpDir()
+	return resp
 }
 
 // buildEnterpriseModelsStatus assembles the status rows from the cache.

@@ -147,12 +147,29 @@ func TestParseEnterpriseModels_Errors(t *testing.T) {
 		``,
 		`not json`,
 		`{"other":1}`,
-		`[]`,                     // empty list
-		`{"models":[]}`,          // empty list
 		`{"models":[{"id":""}]}`, // only invalid models
 	} {
 		if _, err := parseEnterpriseModels([]byte(raw)); err == nil {
 			t.Errorf("raw=%q should error", raw)
+		}
+	}
+}
+
+func TestParseEnterpriseModels_EmptyListIsFresh(t *testing.T) {
+	// Verified against the real upstream: an enterprise with no custom
+	// models configured answers 200 with {"code":0,...,"data":[]}.
+	// A well-formed empty list is a legitimate state, not an error.
+	for _, raw := range []string{
+		`[]`,
+		`{"models":[]}`,
+		`{"code":0,"msg":"OK","requestId":"x","data":[]}`,
+	} {
+		out, err := parseEnterpriseModels([]byte(raw))
+		if err != nil {
+			t.Errorf("raw=%q should parse as empty success, got err=%v", raw, err)
+		}
+		if len(out) != 0 {
+			t.Errorf("raw=%q want empty result, got %+v", raw, out)
 		}
 	}
 }
