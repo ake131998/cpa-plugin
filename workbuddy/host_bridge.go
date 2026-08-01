@@ -150,6 +150,22 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 	if err != nil {
 		return hostHTTPDoDirect(req, bodyBytes)
 	}
+	resp, err := decodeHostHTTPResponse(result)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// decodeHostHTTPResponse decodes the host.http.do Result payload. The host
+// serializes pluginapi.HTTPResponse, which carries no json tags, so the wire
+// keys are the Go field names ("StatusCode", "Headers", "Body"). Earlier
+// plugin builds expected snake_case "status_code", which never matched — the
+// status code silently decoded as 0 and every caller treating !=200 as
+// failure broke. Decode both key sets and prefer the non-zero status; Body
+// and Headers fall back to the PascalCase keys when the snake_case decode
+// left them empty.
+func decodeHostHTTPResponse(result json.RawMessage) (*hostHTTPResponse, error) {
 	var resp struct {
 		StatusCode int                 `json:"status_code"`
 		Headers    map[string][]string `json:"headers,omitempty"`
@@ -157,6 +173,22 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 	}
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return nil, fmt.Errorf("decode host.http.do response: %w", err)
+	}
+	if resp.StatusCode == 0 {
+		var alt struct {
+			StatusCode int                 `json:"StatusCode"`
+			Headers    map[string][]string `json:"Headers,omitempty"`
+			Body       []byte              `json:"Body,omitempty"`
+		}
+		if err := json.Unmarshal(result, &alt); err == nil && alt.StatusCode != 0 {
+			resp.StatusCode = alt.StatusCode
+			if len(resp.Body) == 0 {
+				resp.Body = alt.Body
+			}
+			if len(resp.Headers) == 0 {
+				resp.Headers = alt.Headers
+			}
+		}
 	}
 	return &hostHTTPResponse{
 		StatusCode: resp.StatusCode,

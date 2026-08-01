@@ -19,17 +19,30 @@ import (
 )
 
 func wbModels() []pluginapi.ModelInfo {
+	chat := []string{"chat"}
 	return []pluginapi.ModelInfo{
-		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5.1", Name: "GLM-5.1", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5v-turbo", Name: "GLM-5V Turbo", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kimi-k2.7", Name: "Kimi K2.7", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "minimax-m3", Name: "MiniMax M3", ContextLength: 204800, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3-preview", Name: "Hy3 Preview", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3-preview-agent", Name: "Hy3 Preview Agent", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "default", Name: "Default", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "deepseek-v3-2-volc", Name: "DeepSeek V3.2 Volc", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "minimax-m2.5", Name: "MiniMax M2.5", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "minimax-m2.7", Name: "MiniMax M2.7", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "minimax-m3-pay", Name: "MiniMax M3", ContextLength: 204800, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-5.1", Name: "GLM-5.1", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-5.0", Name: "GLM-5.0", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-5.0-turbo", Name: "GLM-5.0 Turbo", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-5v-turbo", Name: "GLM-5V Turbo", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-4.7", Name: "GLM-4.7", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-4.6", Name: "GLM-4.6", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "glm-4.6v", Name: "GLM-4.6V", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "kimi-k3-2", Name: "Kimi K3", ContextLength: 1000000, MaxCompletionTokens: 32768, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "kimi-k2.7", Name: "Kimi K2.7", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "kimi-k2.6", Name: "Kimi K2.6", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "kimi-k2.5", Name: "Kimi K2.5", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "kimi-k2-thinking", Name: "Kimi K2 Thinking", OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: chat},
+		{ID: "hunyuan-chat", Name: "Hunyuan Chat", OwnedBy: providerName, SupportedGenerationMethods: chat},
 	}
 }
 
@@ -152,6 +165,73 @@ func isGlobalToken(accessToken string) bool {
 	return strings.Contains(strings.ToLower(claims.ISS), "workbuddy.ai")
 }
 
+// upstreamModel is one entry of the personal or enterprise config/models
+// response. The upstream's real field names are maxInputTokens /
+// maxOutputTokens / maxAllowedSize (verified against live responses); the
+// older contextWindow / maxTokens names are tolerated for older shapes.
+type upstreamModel struct {
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	Tags               []string        `json:"tags"`
+	Description        string          `json:"description"`
+	Credits            string          `json:"credits"`
+	Configurable       bool            `json:"configurable"`
+	Configured         bool            `json:"configured"`
+	IsDefault          bool            `json:"isDefault"`
+	SupportsImages     bool            `json:"supportsImages"`
+	SupportsReasoning  bool            `json:"supportsReasoning"`
+	OnlyReasoning      bool            `json:"onlyReasoning"`
+	Reasoning          json.RawMessage `json:"reasoning"`
+	DisabledMultimodal bool            `json:"disabledMultimodal"`
+	Disabled           bool            `json:"disabled"`
+	DisabledReason     string          `json:"disabledReason"`
+	MaxInputTokens     json.RawMessage `json:"maxInputTokens"`
+	MaxOutputTokens    json.RawMessage `json:"maxOutputTokens"`
+	MaxAllowedSize     json.RawMessage `json:"maxAllowedSize"`
+	ContextWindow      json.RawMessage `json:"contextWindow"`
+	MaxTokens          json.RawMessage `json:"maxTokens"`
+}
+
+// rawToAny decodes a json.RawMessage into the any forms firstNumeric
+// understands (float64 / json.Number / string), returning nil on empty or
+// malformed input.
+func rawToAny(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
+// upstreamModelToInfo converts one upstream model entry, tolerating numeric
+// and numeric-string fields. The context/max-token resolution order matches
+// the verified upstream field names first (maxInputTokens/maxOutputTokens),
+// then the legacy contextWindow/maxTokens, then maxAllowedSize.
+func upstreamModelToInfo(m upstreamModel) pluginapi.ModelInfo {
+	ctxLen := firstNumeric(rawToAny(m.MaxInputTokens), rawToAny(m.ContextWindow), rawToAny(m.MaxAllowedSize))
+	maxTok := firstNumeric(rawToAny(m.MaxOutputTokens), rawToAny(m.MaxTokens))
+	return pluginapi.ModelInfo{
+		ID:                         m.ID,
+		Name:                       m.Name,
+		ContextLength:              ctxLen,
+		MaxCompletionTokens:        maxTok,
+		OwnedBy:                    providerName,
+		SupportedGenerationMethods: []string{"chat"},
+	}
+}
+
+// personalModelsBaseCN / personalModelsBaseGlobal are the personal models
+// endpoint templates per realm ("%s"-free; realm pick is by token). Vars
+// (not consts) so tests can point them at an httptest server — billingBase
+// pattern.
+var (
+	personalModelsBaseCN     = endpointModels
+	personalModelsBaseGlobal = upstreamBaseGlobal + "/console/enterprises/personal/models"
+)
+
 // callModelsAPI GETs /console/enterprises/personal/models from the upstream.
 // Uses the shared client (connection pooling) with a per-request 15s budget;
 // the shared client's own 120s timeout stays as the outer bound.
@@ -161,10 +241,10 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 	// Model discovery is per-realm: Global tokens must query workbuddy.ai,
 	// not copilot.tencent.com (which 500s for Global tokens). Decode JWT iss.
 	isGlobal := isGlobalToken(accessToken)
-	modelsURL := endpointModels
+	modelsURL := personalModelsBaseCN
 	origin := originReferer
 	if isGlobal {
-		modelsURL = upstreamBaseGlobal + "/console/enterprises/personal/models"
+		modelsURL = personalModelsBaseGlobal
 		origin = originRefererGlobal
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
@@ -181,30 +261,17 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 		return nil, err
 	}
 	body := resp.Body
+	// Debug mirror: the personal models response shape is non-contractual and
+	// unverifiable via curl (OAuth bearer required), so the raw body is dumped
+	// under the same mechanism as the enterprise list.
+	dumpUpstreamResponse("personal_models", http.MethodGet, modelsURL, resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models API status %d", resp.StatusCode)
 	}
 	var apiResp struct {
 		Code int `json:"code"`
 		Data struct {
-			Models []struct {
-				ID                 string          `json:"id"`
-				Name               string          `json:"name"`
-				Description        string          `json:"description"`
-				Credits            string          `json:"credits"`
-				Configurable       bool            `json:"configurable"`
-				Configured         bool            `json:"configured"`
-				IsDefault          bool            `json:"isDefault"`
-				SupportsImages     bool            `json:"supportsImages"`
-				SupportsReasoning  bool            `json:"supportsReasoning"`
-				OnlyReasoning      bool            `json:"onlyReasoning"`
-				Reasoning          json.RawMessage `json:"reasoning"`
-				DisabledMultimodal bool            `json:"disabledMultimodal"`
-				Disabled           bool            `json:"disabled"`
-				DisabledReason     string          `json:"disabledReason"`
-				ContextWindow      json.RawMessage `json:"contextWindow"`
-				MaxTokens          json.RawMessage `json:"maxTokens"`
-			} `json:"models"`
+			Models []upstreamModel `json:"models"`
 			Agents []struct {
 				Name   string   `json:"name"`
 				Models []string `json:"models"`
@@ -217,68 +284,46 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 	if apiResp.Code != 0 {
 		return nil, fmt.Errorf("models API code %d", apiResp.Code)
 	}
-	var cliModelIDs []string
+	// Prefer the cli agent's model ids when present (historical contract);
+	// fall back to the full model list otherwise — the live upstream no longer
+	// sends an agents array, and hard-failing there forced every caller onto
+	// the hardcoded fallback list.
+	cliModelIDs := []string(nil)
 	for _, a := range apiResp.Data.Agents {
 		if a.Name == "cli" {
 			cliModelIDs = a.Models
 			break
 		}
 	}
-	if len(cliModelIDs) == 0 {
-		return nil, fmt.Errorf("no cli agent models found")
-	}
-	dynMap := make(map[string]struct {
-		ID                 string          `json:"id"`
-		Name               string          `json:"name"`
-		Description        string          `json:"description"`
-		Credits            string          `json:"credits"`
-		Configurable       bool            `json:"configurable"`
-		Configured         bool            `json:"configured"`
-		IsDefault          bool            `json:"isDefault"`
-		SupportsImages     bool            `json:"supportsImages"`
-		SupportsReasoning  bool            `json:"supportsReasoning"`
-		OnlyReasoning      bool            `json:"onlyReasoning"`
-		Reasoning          json.RawMessage `json:"reasoning"`
-		DisabledMultimodal bool            `json:"disabledMultimodal"`
-		Disabled           bool            `json:"disabled"`
-		DisabledReason     string          `json:"disabledReason"`
-		ContextWindow      json.RawMessage `json:"contextWindow"`
-		MaxTokens          json.RawMessage `json:"maxTokens"`
-	}, len(apiResp.Data.Models))
+	dynMap := make(map[string]upstreamModel, len(apiResp.Data.Models))
 	for _, m := range apiResp.Data.Models {
 		dynMap[m.ID] = m
 	}
 	var out []pluginapi.ModelInfo
-	for _, id := range cliModelIDs {
-		m, ok := dynMap[id]
-		if !ok {
-			continue
+	if len(cliModelIDs) > 0 {
+		for _, id := range cliModelIDs {
+			m, ok := dynMap[id]
+			if !ok || m.Disabled {
+				continue
+			}
+			out = append(out, upstreamModelToInfo(m))
 		}
+		return out, nil
+	}
+	// No cli agent: use the full list, keeping only chat-tagged entries
+	// (untagged models stay for shape compatibility). Drops image/skill-only
+	// models like hunyuan-image-v3.0-art.
+	for _, m := range apiResp.Data.Models {
 		if m.Disabled {
 			continue
 		}
-		ctxLen := int64(0)
-		if len(m.ContextWindow) > 0 {
-			var v float64
-			if err := json.Unmarshal(m.ContextWindow, &v); err == nil {
-				ctxLen = int64(v)
-			}
+		if len(m.Tags) > 0 && !containsFold(m.Tags, "chat") {
+			continue
 		}
-		maxTok := int64(0)
-		if len(m.MaxTokens) > 0 {
-			var v float64
-			if err := json.Unmarshal(m.MaxTokens, &v); err == nil {
-				maxTok = int64(v)
-			}
-		}
-		out = append(out, pluginapi.ModelInfo{
-			ID:                         m.ID,
-			Name:                       m.Name,
-			ContextLength:              ctxLen,
-			MaxCompletionTokens:        maxTok,
-			OwnedBy:                    providerName,
-			SupportedGenerationMethods: []string{"chat"},
-		})
+		out = append(out, upstreamModelToInfo(m))
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no usable models in personal list")
 	}
 	return out, nil
 }
@@ -440,6 +485,9 @@ func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, []string, 
 		ID                 any      `json:"id"`
 		Name               any      `json:"name"`
 		Tags               []string `json:"tags"`
+		MaxInputTokens     any      `json:"maxInputTokens"`
+		MaxOutputTokens    any      `json:"maxOutputTokens"`
+		MaxAllowedSize     any      `json:"maxAllowedSize"`
 		ContextWindow      any      `json:"contextWindow"`
 		Context            any      `json:"context"`
 		ContextWindowSnake any      `json:"context_window"`
@@ -462,8 +510,10 @@ func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, []string, 
 	if n, ok := toString(m.Name); ok && strings.TrimSpace(n) != "" {
 		name = n
 	}
-	ctxLen := firstNumeric(m.ContextWindow, m.Context, m.ContextWindowSnake)
-	maxTok := firstNumeric(m.MaxTokens, m.MaxToken, m.MaxTokensSnake)
+	// Verified upstream field names first (maxInputTokens/maxOutputTokens),
+	// then the legacy contextWindow/maxTokens variants.
+	ctxLen := firstNumeric(m.MaxInputTokens, m.ContextWindow, m.Context, m.ContextWindowSnake, m.MaxAllowedSize)
+	maxTok := firstNumeric(m.MaxOutputTokens, m.MaxTokens, m.MaxToken, m.MaxTokensSnake)
 	return pluginapi.ModelInfo{
 		ID:                         id,
 		Name:                       name,
@@ -672,9 +722,11 @@ func handleModelStatic(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	cacheModelAliases(req.Host)
-	models := wbModels()
-	models = filterExcludedModels(models, req.Host)
-	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
+	// Static (global, tokenless) path returns an empty list: the real model
+	// set is only discoverable per-auth from the upstream, and a hardcoded
+	// global list would leak stale/removed models (e.g. no kimi-k3-2) into
+	// the client's picker.
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName})
 }
 
 func handleModelForAuth(raw []byte) ([]byte, error) {
