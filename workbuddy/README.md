@@ -13,8 +13,14 @@ dashboard.
 - **OAuth login** — multi-account `workbuddy-<uid>.json` auth files via the
   host's auth store. CN and Global realms share one plugin, one config block.
 - **Dynamic models** — live model list from the upstream models API with a
-  5-minute cache and a static fallback. Host-side `oauth-model-alias` /
-  `oauth-excluded-models` config applies unchanged.
+  5-minute cache and a static fallback. Enterprise admin-defined custom
+  models (`/console/enterprises/<enterpriseId>/config/models`) are merged in
+  per account — enterprise entries override on ID collision, new IDs are
+  appended — and refreshed proactively every 15 minutes (plus
+  stale-while-error, so a failed refresh never drops models). Inspect the
+  merged state via `GET /v0/management/plugins/workbuddy/models/enterprise`.
+  Host-side `oauth-model-alias` / `oauth-excluded-models` config applies
+  unchanged.
 - **Executor** — OpenAI-compatible chat completions, both streaming (real SSE
   via `host.stream.emit`) and non-streaming (SSE folded into a single
   completion). `tool_choice` normalization, Claude Code template sanitization,

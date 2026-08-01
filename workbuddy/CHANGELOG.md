@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.8.3
+
+### Enterprise custom model list
+
+- `models.go` — new `callEnterpriseModelsAPI` fetches the enterprise
+  admin-defined model list from `{realm-base}/console/enterprises/<enterpriseId>/config/models`
+  (realm routed by JWT `iss`, same as the personal models API). Response is
+  parsed tolerantly (array / `models` / `data` / `data.models` / envelope
+  shapes; camelCase or snake_case context/max-token fields; numbers or
+  numeric strings; `disabled` models skipped).
+- `models.go` — `mergeEnterprise`: enterprise models are merged into the
+  default list per auth; on ID collision the enterprise entry **overrides**
+  (admin-configured), new IDs are appended. Merging happens at return time —
+  the cache holds only the pure enterprise list.
+- `enterprise_refresh.go` (new) — proactive refresh loop started from
+  `configure()` (idempotent): every `enterpriseModelsTTL` (15 min) all
+  accounts' enterprise lists are re-fetched (bounded concurrency), so
+  admin-published model changes surface even when the host never re-queries
+  `model.for_auth`.
+- `enterprise_refresh.go` — stale-while-error: a failed refresh keeps the
+  previously fetched list (models never vanish on a transient upstream
+  failure) and records the error for observability.
+- `management.go` — new `GET /v0/management/plugins/workbuddy/models/enterprise`
+  endpoint: per-account enterprise model list (id/name/context/max_tokens)
+  plus refresh status (`fresh`/`stale`/`error`/`pending`/`no_enterprise`,
+  last fetch time, next refresh, last error).
+- `oauth.go` / `keepalive.go` — `enrichAccountFromUpstream`: after a token
+  refresh the account data (uid/enterpriseId/nickname) is re-fetched
+  best-effort, backfilling logins whose initial account fetch failed and
+  picking up enterprise membership changes. JWT enterprise-claim scan
+  (`enterprise_id`/`org_id`/`tenant_id`…) serves as a no-request fallback.
+
 ## 0.8.2
 
 ### Concurrency + lifecycle hardening
