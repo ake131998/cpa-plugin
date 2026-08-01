@@ -8,9 +8,11 @@
 // to <dump-dir>/<name>.json (plus a .meta.json with request metadata) so the
 // real response shape can be confirmed by hand.
 //
-// Control: default disabled. Set WB_UPSTREAM_DUMP_DIR to a writable directory
-// to enable. All failures are silent — dumping must never affect normal
-// operation.
+// Control: enabled by default to /tmp/workbuddy_upstream_dump (the dump is
+// the only way to verify non-contractual shapes against a live OAuth-only
+// upstream). Override the directory with WB_UPSTREAM_DUMP_DIR; set it to an
+// empty string to disable. All failures are silent — dumping must never
+// affect normal operation.
 package main
 
 import (
@@ -22,6 +24,10 @@ import (
 	"time"
 )
 
+// defaultUpstreamDumpDir is where raw upstream responses land unless
+// WB_UPSTREAM_DUMP_DIR overrides it.
+const defaultUpstreamDumpDir = "/tmp/workbuddy_upstream_dump"
+
 var (
 	upstreamDumpDirMu   sync.RWMutex
 	upstreamDumpDir     string // "" = disabled
@@ -29,11 +35,18 @@ var (
 )
 
 // loadedUpstreamDumpDir returns the dump directory, reading the
-// WB_UPSTREAM_DUMP_DIR env once at first use. Empty means disabled.
+// WB_UPSTREAM_DUMP_DIR env once at first use. An unset variable defaults to
+// defaultUpstreamDumpDir; an explicitly empty value disables dumping.
 func loadedUpstreamDumpDir() string {
 	upstreamDumpDirOnce.Do(func() {
+		if dir, ok := os.LookupEnv("WB_UPSTREAM_DUMP_DIR"); ok {
+			upstreamDumpDirMu.Lock()
+			upstreamDumpDir = strings.TrimSpace(dir)
+			upstreamDumpDirMu.Unlock()
+			return
+		}
 		upstreamDumpDirMu.Lock()
-		upstreamDumpDir = strings.TrimSpace(os.Getenv("WB_UPSTREAM_DUMP_DIR"))
+		upstreamDumpDir = defaultUpstreamDumpDir
 		upstreamDumpDirMu.Unlock()
 	})
 	upstreamDumpDirMu.RLock()

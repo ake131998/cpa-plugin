@@ -86,7 +86,7 @@ func TestDumpUpstreamResponse_CallEnterpriseModelsIntegration(t *testing.T) {
 	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
 	defer func() { enterpriseModelsBaseCN = old }()
 
-	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-int"); err != nil {
+	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-int", "", ""); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(loadedUpstreamDumpDir(), "enterprise_models_ent-int.json"))

@@ -39,6 +39,56 @@
   responses it receives with a real token. Disabled by default; all failures
   silent.
 
+### Enterprise custom model list — verified-shape fixes (0.8.3)
+
+Verified against the live upstream and the reference client's
+`ModelsProductProvider`; the following fix the feature for real deployments:
+
+- `models.go` — `extractModelArray` now also accepts the observed upstream
+  shape `{"data":{"data":[...]}}` (double-nested `data`), alongside the
+  array/`models`/`data`/`data.models`/envelope forms.
+- `models.go` — `parseEnterpriseModel` reads the `tags` field; entries whose
+  tags are present but lack `"chat"` are dropped (the reference client only
+  feeds chat-tagged models into the chat agent list). Untagged models stay
+  accepted for shape compatibility.
+- `models.go` — `callEnterpriseModelsAPI` now injects the identity headers
+  the reference client's auth interceptor sends: `X-User-Id` (account uid),
+  `X-Enterprise-Id` and `X-Tenant-Id` (enterpriseId), `X-Domain` (auth
+  domain), alongside the `Authorization: Bearer` header.
+- `enterprise_refresh.go` — new `refreshEnterpriseIfStale` passive path:
+  `model.for_auth` re-syncs an enterprise's model cache when it is missing or
+  past its TTL, so a stale cache refreshes on the next models query instead of
+  waiting for the background tick (matches the reference client's
+  session-load behavior). The background loop remains the safety net.
+- `debug_dump.go` — dumping is now **enabled by default** to
+  `/tmp/workbuddy_upstream_dump` (override with `WB_UPSTREAM_DUMP_DIR`;
+  set it empty to disable), so response-shape problems are observable in the
+  field without extra configuration.
+- `enterprise_refresh.go` — refresh loop logs one summary line per run and a
+  per-account result line; the management status endpoint reports the last
+  run's fetched/failed/skipped counts plus `loop_started` and `dump_dir`.
+- `enterprise_refresh.go` — `enterpriseIDFor`: accounts whose auth file lacks
+  `enterpriseId` fall back to the access token's JWT enterprise claims
+  (`enterprise_id`/`org_id`/`tenant_id`), so legacy auth files pick up
+  enterprise models without waiting for a token refresh. Empty upstream list
+  (`{"code":0,...,"data":[]}`) is a fresh, model_count-0 cache entry — not an
+  error.
+
+### Enterprise custom model — opt-in redacted logging (0.8.3)
+
+- New config `enterprise_logging` (boolean, **default false**): when enabled,
+  the per-refresh enterprise model activity is written to the plugin log.
+  Off by default so no account/enterprise identifiers reach log aggregators
+  without an explicit choice.
+- `redact.go` — new `maskIdentifier`: log identifiers (auth index,
+  enterpriseId, uid) keep only their first 4 characters; error text passes
+  through `redactSecrets` (bearer/JWT/token stripping) before logging.
+- `usage_config.go` / `main.go` — `enterprise_logging` parsed from
+  `plugins.configs.workbuddy` on every register/reconfigure, following the
+  existing `checkin_auto` boolean pattern; registered as a Boolean
+  ConfigField. Log lines, including the refresh-loop summary and
+  `host.auth.list` failures, are gated on it.
+
 ## 0.8.2
 
 ### Concurrency + lifecycle hardening

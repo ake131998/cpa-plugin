@@ -51,6 +51,7 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	if models, ok := cachedDynamicModels(); ok {
+		refreshEnterpriseIfStale(storageJSON)
 		return mergeEnterprise(storageJSON, models)
 	}
 	accessToken := ""
@@ -60,12 +61,15 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		}
 	}
 	if accessToken == "" {
+		refreshEnterpriseIfStale(storageJSON)
 		return mergeEnterprise(storageJSON, wbModels())
 	}
 	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
 		storeDynamicModels(dyn)
+		refreshEnterpriseIfStale(storageJSON)
 		return mergeEnterprise(storageJSON, dyn)
 	}
+	refreshEnterpriseIfStale(storageJSON)
 	return mergeEnterprise(storageJSON, wbModels())
 }
 
@@ -289,9 +293,12 @@ var (
 
 // callEnterpriseModelsAPI GETs /console/enterprises/<enterpriseId>/config/models
 // — the enterprise-admin-defined custom model list. Uses the same realm
-// routing as callModelsAPI (Global tokens must hit workbuddy.ai). Any error
-// returns nil so callers silently fall back to the default list.
-func callEnterpriseModelsAPI(accessToken, enterpriseID string) ([]pluginapi.ModelInfo, error) {
+// routing as callModelsAPI (Global tokens must hit workbuddy.ai). The
+// X-User-Id / X-Enterprise-Id / X-Tenant-Id / X-Domain headers mirror the
+// reference client's auth interceptor (ModelsProductProvider), which the
+// backend uses to resolve the requesting enterprise. Any error returns nil so
+// callers silently fall back to the default list.
+func callEnterpriseModelsAPI(accessToken, enterpriseID, userID, domain string) ([]pluginapi.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	modelsURL := fmt.Sprintf(enterpriseModelsBaseCN, enterpriseID)
@@ -306,6 +313,14 @@ func callEnterpriseModelsAPI(accessToken, enterpriseID string) ([]pluginapi.Mode
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(userID) != "" {
+		req.Header.Set("X-User-Id", userID)
+	}
+	req.Header.Set("X-Enterprise-Id", enterpriseID)
+	req.Header.Set("X-Tenant-Id", enterpriseID)
+	if strings.TrimSpace(domain) != "" {
+		req.Header.Set("X-Domain", domain)
+	}
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", clientUA)
@@ -330,11 +345,14 @@ func callEnterpriseModelsAPI(accessToken, enterpriseID string) ([]pluginapi.Mode
 //	{models:[...]}                     named array
 //	{data:[...]}                       wrapped array
 //	{data:{models:[...]}}              nested object
+//	{data:{data:[...]}}                double-nested (observed upstream shape)
 //	{code,msg,data:{models:[...]}}     apiEnvelope shape
 //
 // Each model tolerates id/name/context/max-token fields in camelCase or
 // snake_case, as JSON numbers or numeric strings. Disabled models are
-// dropped, matching callModelsAPI semantics.
+// dropped. Models whose tags field is present but lacks "chat" are dropped
+// too — the reference client only feeds models tagged "chat" into the chat
+// agent's list; untagged models are kept for shape compatibility.
 func parseEnterpriseModels(raw []byte) ([]pluginapi.ModelInfo, error) {
 	var list []json.RawMessage
 	if !extractModelArray(raw, &list) {
@@ -349,9 +367,12 @@ func parseEnterpriseModels(raw []byte) ([]pluginapi.ModelInfo, error) {
 	}
 	out := make([]pluginapi.ModelInfo, 0, len(list))
 	for _, item := range list {
-		m, err := parseEnterpriseModel(item)
+		m, tags, err := parseEnterpriseModel(item)
 		if err != nil {
 			continue
+		}
+		if len(tags) > 0 && !containsFold(tags, "chat") {
+			continue // tagged but not a chat model (agent/skill entry)
 		}
 		out = append(out, m)
 	}
@@ -359,6 +380,16 @@ func parseEnterpriseModels(raw []byte) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("enterprise models: no parseable models")
 	}
 	return out, nil
+}
+
+// containsFold reports whether tags contains value (case-insensitive).
+func containsFold(tags []string, value string) bool {
+	for _, t := range tags {
+		if strings.EqualFold(strings.TrimSpace(t), value) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractModelArray locates the model array inside any of the tolerated
@@ -384,11 +415,13 @@ func extractModelArray(raw []byte, list *[]json.RawMessage) bool {
 		if t[0] == '[' {
 			return json.Unmarshal(t, list) == nil
 		}
-		// {data:{models:[...]}} and {code,data:{models:[...]}}
+		// {data:{models:[...]}} / {data:{data:[...]}} / {code,data:{models:[...]}}
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(t, &nested) == nil {
-			if mv, ok2 := nested["models"]; ok2 && len(mv) > 0 && bytes.TrimSpace(mv)[0] == '[' {
-				return json.Unmarshal(mv, list) == nil
+			for _, nk := range []string{"models", "data"} {
+				if nv, ok2 := nested[nk]; ok2 && len(nv) > 0 && bytes.TrimSpace(nv)[0] == '[' {
+					return json.Unmarshal(nv, list) == nil
+				}
 			}
 		}
 		if key == "models" {
@@ -400,28 +433,30 @@ func extractModelArray(raw []byte, list *[]json.RawMessage) bool {
 
 // parseEnterpriseModel converts one model object into ModelInfo, tolerating
 // camelCase/snake_case and numeric-string fields. A missing/invalid id drops
-// the model; disabled models are skipped.
-func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, error) {
+// the model; disabled models are skipped. The tags slice is returned so the
+// caller can apply the reference client's "chat"-tag filter.
+func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, []string, error) {
 	var m struct {
-		ID                 any `json:"id"`
-		Name               any `json:"name"`
-		ContextWindow      any `json:"contextWindow"`
-		Context            any `json:"context"`
-		ContextWindowSnake any `json:"context_window"`
-		MaxTokens          any `json:"maxTokens"`
-		MaxToken           any `json:"maxToken"`
-		MaxTokensSnake     any `json:"max_tokens"`
-		Disabled           any `json:"disabled"`
+		ID                 any      `json:"id"`
+		Name               any      `json:"name"`
+		Tags               []string `json:"tags"`
+		ContextWindow      any      `json:"contextWindow"`
+		Context            any      `json:"context"`
+		ContextWindowSnake any      `json:"context_window"`
+		MaxTokens          any      `json:"maxTokens"`
+		MaxToken           any      `json:"maxToken"`
+		MaxTokensSnake     any      `json:"max_tokens"`
+		Disabled           any      `json:"disabled"`
 	}
 	if err := json.Unmarshal(item, &m); err != nil {
-		return pluginapi.ModelInfo{}, err
+		return pluginapi.ModelInfo{}, nil, err
 	}
 	id, _ := toString(m.ID)
 	if strings.TrimSpace(id) == "" {
-		return pluginapi.ModelInfo{}, fmt.Errorf("model missing id")
+		return pluginapi.ModelInfo{}, nil, fmt.Errorf("model missing id")
 	}
 	if disabled, _ := toBool(m.Disabled); disabled {
-		return pluginapi.ModelInfo{}, fmt.Errorf("model disabled")
+		return pluginapi.ModelInfo{}, nil, fmt.Errorf("model disabled")
 	}
 	name := id
 	if n, ok := toString(m.Name); ok && strings.TrimSpace(n) != "" {
@@ -436,7 +471,7 @@ func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, error) {
 		MaxCompletionTokens:        maxTok,
 		OwnedBy:                    providerName,
 		SupportedGenerationMethods: []string{"chat"},
-	}, nil
+	}, m.Tags, nil
 }
 
 func toString(v any) (string, bool) {

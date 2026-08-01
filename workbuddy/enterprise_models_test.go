@@ -95,6 +95,7 @@ func TestParseEnterpriseModels_Shapes(t *testing.T) {
 		{"models key", `{"models":[` + model + `]}`},
 		{"data key", `{"data":[` + model + `]}`},
 		{"data.models", `{"data":{"models":[` + model + `]}}`},
+		{"data.data", `{"data":{"data":[` + model + `]}}`},
 		{"envelope", `{"code":0,"msg":"ok","data":{"models":[` + model + `]}}`},
 	}
 	for _, tc := range cases {
@@ -142,6 +143,35 @@ func TestParseEnterpriseModels_SkipsDisabledAndInvalid(t *testing.T) {
 	}
 }
 
+func TestParseEnterpriseModels_TagsFilter(t *testing.T) {
+	// The reference client only feeds models tagged "chat" into the chat
+	// agent's list; tagged non-chat entries (agents/skills) are dropped.
+	// Untagged models are kept for shape compatibility.
+	raw := `{"data":[`
+	raw += `{"id":"chat-ok","tags":["chat"]},`
+	raw += `{"id":"multi","tags":["agent","CHAT"]},`
+	raw += `{"id":"no-chat","tags":["agent"]},`
+	raw += `{"id":"untagged"}`
+	raw += `]}`
+	out, err := parseEnterpriseModels([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("want 3 (chat-ok, multi, untagged), got %+v", out)
+	}
+	seen := map[string]bool{}
+	for _, m := range out {
+		seen[m.ID] = true
+	}
+	if !seen["chat-ok"] || !seen["multi"] || !seen["untagged"] {
+		t.Errorf("missing expected models: %+v", seen)
+	}
+	if seen["no-chat"] {
+		t.Error("non-chat tagged model must be dropped")
+	}
+}
+
 func TestParseEnterpriseModels_Errors(t *testing.T) {
 	for _, raw := range []string{
 		``,
@@ -186,7 +216,8 @@ func TestCallEnterpriseModelsAPI_RealmRouting(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer "+cnTok {
 			t.Errorf("CN bearer mismatch: %q", r.Header.Get("Authorization"))
 		}
-		_, _ = w.Write([]byte(`{"code":0,"data":{"models":[{"id":"cn-m"}]}}`))
+		assertEnterpriseHeaders(t, r, "u-1", "ent-cn", "codebuddy.cn")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"data":[{"id":"cn-m","tags":["chat"]}]}}`))
 	}))
 	defer cnSrv.Close()
 	glSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -196,6 +227,7 @@ func TestCallEnterpriseModelsAPI_RealmRouting(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer "+glTok {
 			t.Errorf("Global bearer mismatch: %q", r.Header.Get("Authorization"))
 		}
+		assertEnterpriseHeaders(t, r, "u-2", "ent-gl", "workbuddy.ai")
 		_, _ = w.Write([]byte(`[{"id":"gl-m"}]`))
 	}))
 	defer glSrv.Close()
@@ -207,13 +239,32 @@ func TestCallEnterpriseModelsAPI_RealmRouting(t *testing.T) {
 		enterpriseModelsBaseCN, enterpriseModelsBaseGlobal = oldCN, oldGL
 	}()
 
-	cnOut, err := callEnterpriseModelsAPI(cnTok, "ent-cn")
+	cnOut, err := callEnterpriseModelsAPI(cnTok, "ent-cn", "u-1", "codebuddy.cn")
 	if err != nil || len(cnOut) != 1 || cnOut[0].ID != "cn-m" {
 		t.Fatalf("CN fetch failed: %+v err=%v", cnOut, err)
 	}
-	glOut, err := callEnterpriseModelsAPI(glTok, "ent-gl")
+	glOut, err := callEnterpriseModelsAPI(glTok, "ent-gl", "u-2", "workbuddy.ai")
 	if err != nil || len(glOut) != 1 || glOut[0].ID != "gl-m" {
 		t.Fatalf("Global fetch failed: %+v err=%v", glOut, err)
+	}
+}
+
+// assertEnterpriseHeaders checks the interceptor-mirroring headers the
+// reference client injects (ModelsProductProvider): X-User-Id, X-Enterprise-Id,
+// X-Tenant-Id and X-Domain.
+func assertEnterpriseHeaders(t *testing.T, r *http.Request, uid, eid, domain string) {
+	t.Helper()
+	if got := r.Header.Get("X-User-Id"); got != uid {
+		t.Errorf("X-User-Id=%q want %q", got, uid)
+	}
+	if got := r.Header.Get("X-Enterprise-Id"); got != eid {
+		t.Errorf("X-Enterprise-Id=%q want %q", got, eid)
+	}
+	if got := r.Header.Get("X-Tenant-Id"); got != eid {
+		t.Errorf("X-Tenant-Id=%q want %q", got, eid)
+	}
+	if got := r.Header.Get("X-Domain"); got != domain {
+		t.Errorf("X-Domain=%q want %q", got, domain)
 	}
 }
 
@@ -225,7 +276,7 @@ func TestCallEnterpriseModelsAPI_Non200(t *testing.T) {
 	old := enterpriseModelsBaseCN
 	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
 	defer func() { enterpriseModelsBaseCN = old }()
-	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-x"); err == nil {
+	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-x", "", ""); err == nil {
 		t.Fatal("500 must error")
 	}
 }

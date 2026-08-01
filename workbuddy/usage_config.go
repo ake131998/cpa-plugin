@@ -42,6 +42,12 @@ var (
 	// plus per-IP token-bucket rate limiting on mutating endpoints.
 	managementAPIKey   = ""
 	managementAPIKeyMu sync.RWMutex
+
+	// enterpriseLogging: opt-in, redacted per-refresh log output for the
+	// enterprise custom model feature. Off by default — identifiers are
+	// masked and error text is passed through redactSecrets when enabled.
+	enterpriseLogging   = false
+	enterpriseLoggingMu sync.RWMutex
 )
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -62,6 +68,7 @@ func configure(raw []byte) {
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
 	nextMgmtKey := ""
+	nextEnterpriseLogging := false
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -104,6 +111,11 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextKeepaliveAuto = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "enterprise_logging:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "enterprise_logging:"))
+					v = strings.Trim(v, "\"'")
+					nextEnterpriseLogging = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
 			}
 		}
 	}
@@ -124,6 +136,10 @@ func configure(raw []byte) {
 	keepaliveAutoMu.Lock()
 	keepaliveAuto = nextKeepaliveAuto
 	keepaliveAutoMu.Unlock()
+
+	enterpriseLoggingMu.Lock()
+	enterpriseLogging = nextEnterpriseLogging
+	enterpriseLoggingMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
@@ -208,4 +224,13 @@ func readSecretFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// enterpriseLoggingEnabled reports whether per-refresh enterprise model
+// activity should be written to the plugin log (config enterprise_logging,
+// default false).
+func enterpriseLoggingEnabled() bool {
+	enterpriseLoggingMu.RLock()
+	defer enterpriseLoggingMu.RUnlock()
+	return enterpriseLogging
 }

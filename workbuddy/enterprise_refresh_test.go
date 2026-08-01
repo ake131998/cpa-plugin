@@ -135,7 +135,7 @@ func TestEnterpriseRefreshLoop_FetchAndStore(t *testing.T) {
 	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
 	defer func() { enterpriseModelsBaseCN = old }()
 
-	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-1"); err != nil {
+	if _, err := callEnterpriseModelsAPI(cnToken(), "ent-1", "u-1", "codebuddy.cn"); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	storeEnterpriseModels("ent-1", []pluginapi.ModelInfo{{ID: "custom:GPT", Name: "GPT"}})
@@ -144,6 +144,71 @@ func TestEnterpriseRefreshLoop_FetchAndStore(t *testing.T) {
 		t.Fatalf("cache not updated: %+v", entry)
 	}
 	wipeEnterpriseCache()
+}
+
+// --- refreshEnterpriseIfStale (passive path) ---------------------------------
+
+func TestRefreshEnterpriseIfStale_FetchesWhenEmpty(t *testing.T) {
+	wipeEnterpriseCache()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Enterprise-Id") != "ent-1" || r.Header.Get("X-User-Id") != "u-1" {
+			t.Errorf("identity headers missing: %q %q", r.Header.Get("X-Enterprise-Id"), r.Header.Get("X-User-Id"))
+		}
+		_, _ = w.Write([]byte(`{"data":{"data":[{"id":"custom:GPT","tags":["chat"]}]}}`))
+	}))
+	defer srv.Close()
+	old := enterpriseModelsBaseCN
+	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
+	defer func() { enterpriseModelsBaseCN = old }()
+
+	refreshEnterpriseIfStale([]byte(`{"auth":{"accessToken":"` + cnToken() + `","domain":"codebuddy.cn"},"account":{"uid":"u-1","enterpriseId":"ent-1"}}`))
+	entry, ok := cachedEnterpriseModels("ent-1")
+	if !ok || len(entry.models) != 1 || entry.models[0].ID != "custom:GPT" {
+		t.Fatalf("cache not populated by passive refresh: %+v", entry)
+	}
+	if entry.err != nil {
+		t.Fatalf("no error expected: %v", entry.err)
+	}
+	wipeEnterpriseCache()
+}
+
+func TestRefreshEnterpriseIfStale_SkipsWhenFresh(t *testing.T) {
+	wipeEnterpriseCache()
+	storeEnterpriseModels("ent-1", []pluginapi.ModelInfo{{ID: "existing"}})
+	defer wipeEnterpriseCache()
+
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		_, _ = w.Write([]byte(`{"data":[{"id":"new"}]}`))
+	}))
+	defer srv.Close()
+	old := enterpriseModelsBaseCN
+	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
+	defer func() { enterpriseModelsBaseCN = old }()
+
+	refreshEnterpriseIfStale([]byte(`{"auth":{"accessToken":"` + cnToken() + `"},"account":{"enterpriseId":"ent-1"}}`))
+	if hit {
+		t.Fatal("fresh cache must not trigger an upstream call")
+	}
+}
+
+func TestRefreshEnterpriseIfStale_SkipsWithoutEnterprise(t *testing.T) {
+	wipeEnterpriseCache()
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+	old := enterpriseModelsBaseCN
+	enterpriseModelsBaseCN = srv.URL + "/console/enterprises/%s/config/models"
+	defer func() { enterpriseModelsBaseCN = old }()
+
+	refreshEnterpriseIfStale([]byte(`{"auth":{"accessToken":"` + cnToken() + `"},"account":{}}`))
+	if hit {
+		t.Fatal("account without enterpriseId must not call upstream")
+	}
 }
 
 // --- status endpoint --------------------------------------------------------

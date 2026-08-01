@@ -40,6 +40,21 @@ func TestTruncateRedacted(t *testing.T) {
 	}
 }
 
+func TestMaskIdentifier(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"workbuddy-uid-abc123", "work***"},
+		{"ent-7f3a9c", "ent-***"},
+		{"abc", "***"},
+		{"", "***"},
+		{"  xyz-long  ", "xyz-***"},
+	}
+	for _, tc := range cases {
+		if got := maskIdentifier(tc.in); got != tc.want {
+			t.Errorf("maskIdentifier(%q)=%q want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func repeat(s string, n int) string {
 	out := make([]byte, 0, len(s)*n)
 	for i := 0; i < n; i++ {

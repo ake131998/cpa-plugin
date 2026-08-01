@@ -66,7 +66,11 @@ func recordEnterpriseRefresh(accounted, fetched, failed, skipped int) {
 	enterpriseRefreshState.failed = failed
 	enterpriseRefreshState.skipped = skipped
 	enterpriseRefreshStateMu.Unlock()
-	log.Printf("[workbuddy] enterprise models refresh: %d accounts, %d fetched, %d failed, %d skipped", accounted, fetched, failed, skipped)
+	// Opt-in only (config enterprise_logging, default false): identifiers are
+	// masked and error text redacted — see enterpriseLoggingEnabled.
+	if enterpriseLoggingEnabled() {
+		log.Printf("[workbuddy] enterprise models refresh: %d accounts, %d fetched, %d failed, %d skipped", accounted, fetched, failed, skipped)
+	}
 }
 
 // ensureEnterpriseRefreshLoop starts the background refresh loop once.
@@ -80,7 +84,9 @@ func ensureEnterpriseRefreshLoop() {
 		return // already running
 	}
 	enterpriseRefreshStop = make(chan struct{})
-	log.Printf("[workbuddy] enterprise models refresh loop started (every %v)", enterpriseModelsTTL)
+	if enterpriseLoggingEnabled() {
+		log.Printf("[workbuddy] enterprise models refresh loop started (every %v)", enterpriseModelsTTL)
+	}
 	go enterpriseRefreshLoop(enterpriseRefreshStop)
 }
 
@@ -108,7 +114,9 @@ func enterpriseRefreshLoop(stop chan struct{}) {
 func refreshEnterpriseModelsAll() {
 	files, err := hostAuthList()
 	if err != nil {
-		log.Printf("[workbuddy] enterprise models refresh: host.auth.list failed: %v", err)
+		if enterpriseLoggingEnabled() {
+			log.Printf("[workbuddy] enterprise models refresh: host.auth.list failed: %v", truncateRedacted(err.Error(), 200))
+		}
 		return
 	}
 	var (
@@ -159,15 +167,52 @@ func refreshEnterpriseModelsForAuth(authIndex string) string {
 	if enterpriseID == "" || strings.TrimSpace(sa.Auth.AccessToken) == "" {
 		return "skipped"
 	}
-	models, err := callEnterpriseModelsAPI(sa.Auth.AccessToken, enterpriseID)
+	models, err := callEnterpriseModelsAPI(sa.Auth.AccessToken, enterpriseID, sa.Account.UID, sa.Auth.Domain)
 	if err != nil {
 		markEnterpriseModelsError(enterpriseID, err)
-		log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refresh failed: %v", authIndex, enterpriseID, err)
+		if enterpriseLoggingEnabled() {
+			log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refresh failed: %v", maskIdentifier(authIndex), maskIdentifier(enterpriseID), truncateRedacted(err.Error(), 200))
+		}
 		return "failed"
 	}
 	storeEnterpriseModels(enterpriseID, models)
-	log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refreshed: %d models", authIndex, enterpriseID, len(models))
+	if enterpriseLoggingEnabled() {
+		log.Printf("[workbuddy] enterprise models: auth %s enterprise %s refreshed: %d models", maskIdentifier(authIndex), maskIdentifier(enterpriseID), len(models))
+	}
 	return "fetched"
+}
+
+// refreshEnterpriseIfStale re-syncs one enterprise's model cache on the
+// passive path (model.for_auth) when the cached entry is missing or older
+// than the TTL. Mirrors the reference client, which re-fetches the config
+// list on every session load instead of waiting for a background tick — so a
+// stale-but-usable cache never needs to fall back to the background loop. The
+// background loop remains the safety net for long-lived sessions.
+func refreshEnterpriseIfStale(storageJSON []byte) {
+	sa, err := parseStored(storageJSON)
+	if err != nil {
+		return
+	}
+	enterpriseID := enterpriseIDFor(sa)
+	accessToken := strings.TrimSpace(sa.Auth.AccessToken)
+	if enterpriseID == "" || accessToken == "" {
+		return
+	}
+	if entry, ok := cachedEnterpriseModels(enterpriseID); ok && time.Since(entry.fetched) < enterpriseModelsTTL {
+		return // cache is fresh
+	}
+	models, err := callEnterpriseModelsAPI(accessToken, enterpriseID, sa.Account.UID, sa.Auth.Domain)
+	if err != nil {
+		markEnterpriseModelsError(enterpriseID, err)
+		if enterpriseLoggingEnabled() {
+			log.Printf("[workbuddy] enterprise models: for_auth refresh failed for enterprise %s: %v", maskIdentifier(enterpriseID), truncateRedacted(err.Error(), 200))
+		}
+		return
+	}
+	storeEnterpriseModels(enterpriseID, models)
+	if enterpriseLoggingEnabled() {
+		log.Printf("[workbuddy] enterprise models: for_auth refresh for enterprise %s: %d models", maskIdentifier(enterpriseID), len(models))
+	}
 }
 
 // -----------------------------------------------------------------------------

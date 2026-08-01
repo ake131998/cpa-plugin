@@ -136,6 +136,11 @@ plugins:
       # When empty (default) the host's management middleware is the only
       # guard. Also readable from WB_MANAGEMENT_KEY env var.
       management_key: ""
+
+      # Log redacted enterprise custom-model refresh activity (default false).
+      # Identifiers are masked (first 4 chars) and error text is passed
+      # through credential redaction — safe for log aggregation.
+      enterprise_logging: false
 ```
 
 Model aliases and exclusions are handled natively by CPA's

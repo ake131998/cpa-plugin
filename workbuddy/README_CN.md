@@ -110,6 +110,10 @@ plugins:
       # 写端点要求该 Bearer token。空（默认）则只靠宿主 management middleware。
       # 也可从 WB_MANAGEMENT_KEY 环境变量读。
       management_key: ""
+
+      # 记录脱敏后的企业自定义模型刷新日志（默认 false）。
+      # 标识符打码（保留前 4 位），错误文本经凭据脱敏，可安全进入日志采集。
+      enterprise_logging: false
 ```
 
 模型 alias 和排除走 CPA 原生 `oauth-model-alias` 和 `oauth-excluded-models`
