@@ -96,6 +96,10 @@ const (
 	endpointTokenRefresh = upstreamBaseCN + "/v2/plugin/auth/token/refresh"
 	endpointChat         = upstreamBaseCN + "/v2/chat/completions"
 	endpointModels       = upstreamBaseCN + "/console/enterprises/personal/models"
+	// Enterprise custom model list (admin-defined models): GET
+	// {realm-base}/console/enterprises/<enterpriseId>/config/models. The
+	// enterpriseId comes from the stored auth's account data.
+	endpointEnterpriseModels = upstreamBaseCN + "/console/enterprises/%s/config/models"
 
 	loginTTL = 5 * time.Minute
 )
@@ -373,6 +377,74 @@ var dynamicModelsCache struct {
 	sync.RWMutex
 	models  []pluginapi.ModelInfo
 	fetched time.Time
+}
+
+// enterpriseModelsTTL bounds how long a fetched enterprise custom model list
+// is reused, and doubles as the proactive refresh interval. The refresh loop
+// (enterprise_refresh.go) keeps the cache fresh even when the host never
+// re-queries model.for_auth; a stale-but-failed refresh keeps the previous
+// list (stale-while-error) so models never vanish on a transient upstream
+// failure.
+const enterpriseModelsTTL = 15 * time.Minute
+
+// enterpriseModelsEntry is one enterprise's custom model list plus the
+// refresh metadata surfaced by the management status endpoint.
+type enterpriseModelsEntry struct {
+	models  []pluginapi.ModelInfo
+	fetched time.Time // last successful fetch
+	err     error     // last refresh error (stale-while-error)
+	errAt   time.Time
+}
+
+// enterpriseModelsCache holds the pure enterprise list per enterpriseId —
+// merge with the default list happens at return time, never in the cache.
+// Keyed by enterpriseId so multi-enterprise setups don't cross-contaminate.
+var enterpriseModelsCache sync.Map // enterpriseId(string) -> *enterpriseModelsEntry
+
+func storeEnterpriseModels(enterpriseID string, models []pluginapi.ModelInfo) {
+	enterpriseModelsCache.Store(enterpriseID, &enterpriseModelsEntry{
+		models:  models,
+		fetched: time.Now(),
+	})
+}
+
+// cachedEnterpriseModels returns (entry, ok) for one enterprise. TTL expiry
+// is NOT enforced here: the caller (fetchDynamicModelsFromStorage) decides
+// whether to attempt a refresh, and the background loop refreshes proactively.
+// Expired-but-present entries still return old data (stale-while-error) so a
+// transient upstream failure never makes enterprise models disappear.
+func cachedEnterpriseModels(enterpriseID string) (*enterpriseModelsEntry, bool) {
+	if enterpriseID == "" {
+		return nil, false
+	}
+	v, ok := enterpriseModelsCache.Load(enterpriseID)
+	if !ok {
+		return nil, false
+	}
+	return v.(*enterpriseModelsEntry), true
+}
+
+// markEnterpriseModelsError records a failed refresh so the status endpoint
+// can surface freshness/errors instead of silently hiding the problem.
+// Entries are immutable snapshots — a new entry replaces the old (copying
+// the models) so concurrent readers never observe partial mutations.
+func markEnterpriseModelsError(enterpriseID string, err error) {
+	now := time.Now()
+	var fetched time.Time
+	var models []pluginapi.ModelInfo
+	if v, ok := enterpriseModelsCache.Load(enterpriseID); ok {
+		// Preserve the last successful fetch time + models: a failed refresh
+		// must not erase evidence of when the displayed data was fetched.
+		e := v.(*enterpriseModelsEntry)
+		fetched = e.fetched
+		models = e.models
+	}
+	enterpriseModelsCache.Store(enterpriseID, &enterpriseModelsEntry{
+		models:  models,
+		fetched: fetched,
+		err:     err,
+		errAt:   now,
+	})
 }
 
 //

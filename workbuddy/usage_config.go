@@ -136,6 +136,7 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+	ensureEnterpriseRefreshLoop()
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

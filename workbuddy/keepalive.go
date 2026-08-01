@@ -140,6 +140,20 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 		time.Now().Add(time.Duration(tok.ExpiresIn)*time.Second).Unix(),
 		sa.Auth.ExpiresAt,
 	)
+	// Best-effort account enrichment (same as the RPC refresh path): backfill
+	// a login-time-missing enterpriseId/uid and pick up enterprise membership
+	// changes. Never fails the refresh.
+	if eid, uid, nick := enrichAccountFromUpstream(tok.AccessToken); eid != "" || uid != "" || nick != "" {
+		if eid != "" {
+			sa.Account.EnterpriseID = eid
+		}
+		if uid != "" {
+			sa.Account.UID = uid
+		}
+		if nick != "" {
+			sa.Account.Nickname = nick
+		}
+	}
 	if err := persistAuthTokens(authIndex, sa); err != nil {
 		return "error", fmt.Errorf("persist: %w", err)
 	}

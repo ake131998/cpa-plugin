@@ -5,11 +5,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +51,7 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	if models, ok := cachedDynamicModels(); ok {
-		return models
+		return mergeEnterprise(storageJSON, models)
 	}
 	accessToken := ""
 	if len(storageJSON) > 0 {
@@ -58,13 +60,45 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		}
 	}
 	if accessToken == "" {
-		return wbModels()
+		return mergeEnterprise(storageJSON, wbModels())
 	}
 	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
 		storeDynamicModels(dyn)
-		return dyn
+		return mergeEnterprise(storageJSON, dyn)
 	}
-	return wbModels()
+	return mergeEnterprise(storageJSON, wbModels())
+}
+
+// mergeEnterprise overlays the enterprise custom model list (cached per
+// enterpriseId) on top of base. Enterprise models win on ID collisions
+// (admin-configured override); new IDs are appended in enterprise order.
+// The merged result is computed fresh on every call — the cache only holds
+// the pure enterprise list, so a proactive refresh is immediately visible.
+func mergeEnterprise(storageJSON []byte, base []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	enterpriseID := ""
+	if len(storageJSON) > 0 {
+		if sa, err := parseStored(storageJSON); err == nil {
+			enterpriseID = strings.TrimSpace(sa.Account.EnterpriseID)
+		}
+	}
+	entry, ok := cachedEnterpriseModels(enterpriseID)
+	if !ok || len(entry.models) == 0 {
+		return base
+	}
+	out := make([]pluginapi.ModelInfo, len(base))
+	copy(out, base)
+	byID := make(map[string]int, len(base))
+	for i, m := range base {
+		byID[strings.ToLower(m.ID)] = i
+	}
+	for _, em := range entry.models {
+		if i, hit := byID[strings.ToLower(em.ID)]; hit {
+			out[i] = em // enterprise overrides in place
+			continue
+		}
+		out = append(out, em)
+	}
+	return out
 }
 
 // fetchDynamicModels calls the WorkBuddy API to get the latest model list.
@@ -241,6 +275,210 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 		})
 	}
 	return out, nil
+}
+
+// enterpriseModelsBaseCN / enterpriseModelsBaseGlobal are the config/models
+// endpoint templates per realm ("%s" = enterpriseId). Vars (not consts) so
+// tests can point them at an httptest server — billingBase pattern.
+var (
+	enterpriseModelsBaseCN     = endpointEnterpriseModels
+	enterpriseModelsBaseGlobal = upstreamBaseGlobal + "/console/enterprises/%s/config/models"
+)
+
+// callEnterpriseModelsAPI GETs /console/enterprises/<enterpriseId>/config/models
+// — the enterprise-admin-defined custom model list. Uses the same realm
+// routing as callModelsAPI (Global tokens must hit workbuddy.ai). Any error
+// returns nil so callers silently fall back to the default list.
+func callEnterpriseModelsAPI(accessToken, enterpriseID string) ([]pluginapi.ModelInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	modelsURL := fmt.Sprintf(enterpriseModelsBaseCN, enterpriseID)
+	origin := originReferer
+	if isGlobalToken(accessToken) {
+		modelsURL = fmt.Sprintf(enterpriseModelsBaseGlobal, enterpriseID)
+		origin = originRefererGlobal
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", clientUA)
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("enterprise models API status %d", resp.StatusCode)
+	}
+	return parseEnterpriseModels(resp.Body)
+}
+
+// parseEnterpriseModels decodes the config/models response tolerantly — the
+// exact shape is not contractual. Accepted forms (checked in order):
+//
+//	[...]                              direct array
+//	{models:[...]}                     named array
+//	{data:[...]}                       wrapped array
+//	{data:{models:[...]}}              nested object
+//	{code,msg,data:{models:[...]}}     apiEnvelope shape
+//
+// Each model tolerates id/name/context/max-token fields in camelCase or
+// snake_case, as JSON numbers or numeric strings. Disabled models are
+// dropped, matching callModelsAPI semantics.
+func parseEnterpriseModels(raw []byte) ([]pluginapi.ModelInfo, error) {
+	var list []json.RawMessage
+	if !extractModelArray(raw, &list) {
+		return nil, fmt.Errorf("enterprise models: unrecognized response shape")
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("enterprise models: empty list")
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(list))
+	for _, item := range list {
+		m, err := parseEnterpriseModel(item)
+		if err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("enterprise models: no parseable models")
+	}
+	return out, nil
+}
+
+// extractModelArray locates the model array inside any of the tolerated
+// response shapes. Returns false when none matches.
+func extractModelArray(raw []byte, list *[]json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, list) == nil
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return false
+	}
+	for _, key := range []string{"models", "data"} {
+		v, ok := probe[key]
+		if !ok || len(v) == 0 {
+			continue
+		}
+		t := bytes.TrimSpace(v)
+		if t[0] == '[' {
+			return json.Unmarshal(t, list) == nil
+		}
+		// {data:{models:[...]}} and {code,data:{models:[...]}}
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(t, &nested) == nil {
+			if mv, ok2 := nested["models"]; ok2 && len(mv) > 0 && bytes.TrimSpace(mv)[0] == '[' {
+				return json.Unmarshal(mv, list) == nil
+			}
+		}
+		if key == "models" {
+			return false
+		}
+	}
+	return false
+}
+
+// parseEnterpriseModel converts one model object into ModelInfo, tolerating
+// camelCase/snake_case and numeric-string fields. A missing/invalid id drops
+// the model; disabled models are skipped.
+func parseEnterpriseModel(item json.RawMessage) (pluginapi.ModelInfo, error) {
+	var m struct {
+		ID                 any `json:"id"`
+		Name               any `json:"name"`
+		ContextWindow      any `json:"contextWindow"`
+		Context            any `json:"context"`
+		ContextWindowSnake any `json:"context_window"`
+		MaxTokens          any `json:"maxTokens"`
+		MaxToken           any `json:"maxToken"`
+		MaxTokensSnake     any `json:"max_tokens"`
+		Disabled           any `json:"disabled"`
+	}
+	if err := json.Unmarshal(item, &m); err != nil {
+		return pluginapi.ModelInfo{}, err
+	}
+	id, _ := toString(m.ID)
+	if strings.TrimSpace(id) == "" {
+		return pluginapi.ModelInfo{}, fmt.Errorf("model missing id")
+	}
+	if disabled, _ := toBool(m.Disabled); disabled {
+		return pluginapi.ModelInfo{}, fmt.Errorf("model disabled")
+	}
+	name := id
+	if n, ok := toString(m.Name); ok && strings.TrimSpace(n) != "" {
+		name = n
+	}
+	ctxLen := firstNumeric(m.ContextWindow, m.Context, m.ContextWindowSnake)
+	maxTok := firstNumeric(m.MaxTokens, m.MaxToken, m.MaxTokensSnake)
+	return pluginapi.ModelInfo{
+		ID:                         id,
+		Name:                       name,
+		ContextLength:              ctxLen,
+		MaxCompletionTokens:        maxTok,
+		OwnedBy:                    providerName,
+		SupportedGenerationMethods: []string{"chat"},
+	}, nil
+}
+
+func toString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case json.Number:
+		return t.String(), true
+	case float64:
+		return fmt.Sprintf("%g", t), true
+	}
+	return "", false
+}
+
+func toBool(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		b, err := strconv.ParseBool(strings.TrimSpace(t))
+		return b, err == nil
+	case float64:
+		return t != 0, true
+	}
+	return false, false
+}
+
+func firstNumeric(vals ...any) int64 {
+	for _, v := range vals {
+		if v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case float64:
+			return int64(t)
+		case json.Number:
+			if i, err := t.Int64(); err == nil {
+				return i
+			}
+			if f, err := t.Float64(); err == nil {
+				return int64(f)
+			}
+		case string:
+			if i, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+				return i
+			}
+			if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+				return int64(f)
+			}
+		}
+	}
+	return 0
 }
 
 func cacheModelAliases(host pluginapi.HostConfigSummary) {
