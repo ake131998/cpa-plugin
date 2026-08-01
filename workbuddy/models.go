@@ -311,6 +311,10 @@ func callEnterpriseModelsAPI(accessToken, enterpriseID string) ([]pluginapi.Mode
 	if err != nil {
 		return nil, err
 	}
+	// Debug mirror: the config/models response shape is non-contractual and
+	// unverifiable via curl (needs an OAuth bearer), so the raw body is
+	// dumped when WB_UPSTREAM_DUMP_DIR is set.
+	dumpUpstreamResponse("enterprise_models_"+enterpriseID, http.MethodGet, modelsURL, resp.StatusCode, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("enterprise models API status %d", resp.StatusCode)
 	}

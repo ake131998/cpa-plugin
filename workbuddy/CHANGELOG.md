@@ -31,6 +31,13 @@
   best-effort, backfilling logins whose initial account fetch failed and
   picking up enterprise membership changes. JWT enterprise-claim scan
   (`enterprise_id`/`org_id`/`tenant_id`…) serves as a no-request fallback.
+- `debug_dump.go` (new) — response-shape verification: set
+  `WB_UPSTREAM_DUMP_DIR` to a writable directory and the raw bodies of the
+  `config/models` and stateless `login/account` responses are mirrored to
+  `<dir>/<name>.json` (+ `.meta.json`). These endpoints cannot be probed
+  with curl (OAuth bearer required, 401 otherwise), so the plugin dumps the
+  responses it receives with a real token. Disabled by default; all failures
+  silent.
 
 ## 0.8.2
 
