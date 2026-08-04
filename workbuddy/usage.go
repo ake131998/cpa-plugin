@@ -6,9 +6,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -45,10 +49,18 @@ func handleUsage(raw []byte) ([]byte, error) {
 	if started.IsZero() {
 		started = time.Now().Add(-record.Latency)
 	}
+	// Prefer the canonical AuthIndex when the host fills it; fall back to
+	// AuthID (which on some CPA builds is an opaque UUID that does not match
+	// host.auth.list entries, breaking account snapshot resolution).
+	authID := strings.TrimSpace(record.AuthIndex)
+	if authID == "" {
+		authID = record.AuthID
+	}
 	forwardUsageToCPAMP(
 		record.Alias,
 		record.Model,
-		record.AuthID,
+		authID,
+		record.APIKey,
 		started,
 		detail,
 		record.Failed,
@@ -77,7 +89,7 @@ func publishUsage(requestedModel, upstreamModel, authID string, started time.Tim
 	// Fire-and-forget so the executor hot path never blocks on the CPAMP
 	// round-trip. handleUsage (the host-driven path) is synchronous because the
 	// host already runs it on its own goroutine after the request completes.
-	go forwardUsageToCPAMP(alias, model, authID, started, normalizeUsageDetail(detail), failed, statusCode, errBody)
+	go forwardUsageToCPAMP(alias, model, authID, "", started, normalizeUsageDetail(detail), failed, statusCode, errBody)
 }
 
 // forwardUsageToCPAMP POSTs one NDJSON line to CPAMP usage/import.
@@ -85,7 +97,7 @@ func publishUsage(requestedModel, upstreamModel, authID string, started time.Tim
 //
 // v0.7.0: routed via host.http.do so the call is captured by request-log and
 // uses host transport policy (proxy, timeout). Was: raw http.Client.
-func forwardUsageToCPAMP(alias, model, authID string, started time.Time, detail usage.Detail, failed bool, statusCode int, errBody string) {
+func forwardUsageToCPAMP(alias, model, authID, apiKey string, started time.Time, detail usage.Detail, failed bool, statusCode int, errBody string) {
 	usageReportMu.RLock()
 	url := strings.TrimSpace(usageReportURL)
 	key := strings.TrimSpace(usageReportKey)
@@ -117,19 +129,28 @@ func forwardUsageToCPAMP(alias, model, authID string, started time.Time, detail 
 		}
 		failBody = truncate(redactSecrets(errBody), 512)
 	}
+	nickname := accountNicknameFor(authID)
 	payload := map[string]any{
-		"timestamp":     ts.UTC().Format(time.RFC3339Nano),
-		"latency_ms":    latencyMs,
-		"source":        "workbuddy",
-		"auth_index":    strings.TrimSpace(authID),
-		"provider":      providerName,
-		"model":         model,
-		"alias":         alias,
-		"endpoint":      "POST /v1/chat/completions",
-		"auth_type":     "oauth",
-		"executor_type": "workbuddy",
-		"generate":      true,
-		"failed":        failed,
+		// event_hash routes the record through CPAMP's exported-record path so
+		// the extra dimension fields below are mapped verbatim, and makes the
+		// import idempotent (event_hash is unique in CPAMP usage_events).
+		"event_hash":             usageEventHash(ts, authID, model, total),
+		"timestamp":              ts.UTC().Format(time.RFC3339Nano),
+		"latency_ms":             latencyMs,
+		"source":                 "workbuddy",
+		"auth_index":             strings.TrimSpace(authID),
+		"provider":               providerName,
+		"model":                  model,
+		"alias":                  alias,
+		"endpoint":               "POST /v1/chat/completions",
+		"auth_type":              "oauth",
+		"executor_type":          "workbuddy",
+		"generate":               true,
+		"failed":                 failed,
+		"api_key_hash":           hashToken(apiKey),
+		"account_snapshot":       nickname,
+		"auth_label_snapshot":    nickname,
+		"auth_provider_snapshot": providerName,
 		"tokens": map[string]any{
 			"input_tokens":          detail.InputTokens,
 			"output_tokens":         detail.OutputTokens,
@@ -162,6 +183,99 @@ func forwardUsageToCPAMP(alias, model, authID string, started time.Time, detail 
 		return
 	}
 	_ = resp.Body
+}
+
+// usageEventHash derives a stable unique event hash for CPAMP's exported-record
+// path. Truncated to second precision so the host-driven handleUsage and the
+// legacy executor publishUsage for the same request produce the same hash and
+// CPAMP's unique event_hash column dedups them; collisions across distinct
+// requests (same second + auth + model + identical token total) are negligible.
+func usageEventHash(ts time.Time, authID, model string, total int64) string {
+	second := ts.UTC().Truncate(time.Second).Format(time.RFC3339)
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d", second, authID, model, total)))
+	return hex.EncodeToString(h[:])
+}
+
+// hashToken hashes a client API key identifier for CPAMP's api_key_hash column.
+// Empty input yields an empty value (the field is simply omitted from the view).
+func hashToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// accountNicknameCache caches authID → nickname so the per-request usage
+// hot path does not issue a host.auth.get RPC on every request.
+var accountNicknameCache sync.Map // authID → nicknameCacheEntry
+
+type nicknameCacheEntry struct {
+	nickname string
+	at       time.Time
+}
+
+const nicknameCacheTTL = 10 * time.Minute
+
+// accountNicknameFor resolves a human-readable label for an auth identifier
+// via host.auth.list (one RPC for all entries). The host calls usage.handle
+// with AuthID which may be the credential ID, the runtime AuthIndex, or (on
+// some CPA builds) the account UID — match ID/AuthIndex first, then fall back
+// to reading auth file contents and comparing Account.UID.
+func accountNicknameFor(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ""
+	}
+	if v, ok := accountNicknameCache.Load(authID); ok {
+		if e, ok2 := v.(nicknameCacheEntry); ok2 && time.Since(e.at) < nicknameCacheTTL {
+			return e.nickname
+		}
+	}
+	nickname := resolveAccountNickname(authID)
+	accountNicknameCache.Store(authID, nicknameCacheEntry{nickname: nickname, at: time.Now()})
+	return nickname
+}
+
+func resolveAccountNickname(authID string) string {
+	files, err := hostAuthList()
+	if err != nil || len(files) == 0 {
+		return ""
+	}
+	for _, f := range files {
+		if f.ID == authID || f.AuthIndex == authID {
+			if n := strings.TrimSpace(f.Label); n != "" {
+				return n
+			}
+			return strings.TrimSpace(f.Name)
+		}
+	}
+	// Fallback: CPA fills UsageRecord.AuthID with the account UID, which
+	// host.auth.list does not expose — resolve it from auth file contents.
+	for _, f := range files {
+		key := f.AuthIndex
+		if key == "" {
+			key = f.ID
+		}
+		if key == "" {
+			continue
+		}
+		sa, err := hostAuthGet(key)
+		if err != nil || sa == nil {
+			continue
+		}
+		if sa.Account.UID == authID {
+			if n := strings.TrimSpace(sa.Account.Nickname); n != "" {
+				return n
+			}
+			if n := strings.TrimSpace(f.Label); n != "" {
+				return n
+			}
+			return strings.TrimSpace(f.Name)
+		}
+	}
+	return ""
 }
 
 func normalizeUsageDetail(d usage.Detail) usage.Detail {
