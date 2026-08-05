@@ -6,6 +6,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -197,11 +199,123 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 		time.Now().Add(time.Duration(tok.ExpiresIn)*time.Second).Unix(),
 		sa.Auth.ExpiresAt,
 	)
+	// Account data (uid/enterpriseId/nickname) is only captured at login; a
+	// refresh is the only chance to backfill accounts whose login-time
+	// /login/account fetch failed, and to pick up enterprise membership
+	// changes. Enrichment is best-effort — failure never fails the refresh.
+	if eid, uid, nick := enrichAccountFromUpstream(tok.AccessToken); eid != "" || uid != "" || nick != "" {
+		if eid != "" {
+			sa.Account.EnterpriseID = eid
+		}
+		if uid != "" {
+			sa.Account.UID = uid
+		}
+		if nick != "" {
+			sa.Account.Nickname = nick
+		}
+	}
 	// No explicit host.auth.save here: the host's auth Manager persists the
 	// refreshed credential itself after Refresh returns (conductor.go
 	// refreshAuth → m.Update → persist). Writing from the plugin too would
 	// double-write the file.
 	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthDataForRefresh(sa)})
+}
+
+// enrichAccountFromUpstream best-effort re-fetches account identity
+// (uid/enterpriseId/nickname) for a freshly refreshed access token.
+//
+// Primary source: GET /v2/plugin/login/account (no state suffix — the login
+// flow appends "?state=" but the endpoint itself is a plain account lookup
+// keyed by the Bearer token). On any failure the access token's JWT payload
+// is scanned for enterprise claims as a fallback (enterprise_id/org_id/
+// tenant_id). Returns "" for anything it could not determine; callers keep
+// the previous value when a field comes back empty.
+var (
+	// accountEndpointBaseCN / accountEndpointBaseGlobal are vars so tests can
+	// override them with an httptest server (billingBase pattern).
+	accountEndpointBaseCN     = upstreamBaseCN + "/v2/plugin/login/account"
+	accountEndpointBaseGlobal = upstreamBaseGlobal + "/v2/plugin/login/account"
+)
+
+func enrichAccountFromUpstream(accessToken string) (enterpriseID, uid, nickname string) {
+	if accessToken == "" {
+		return "", "", ""
+	}
+	acctURL := accountEndpointBaseCN
+	origin := originReferer
+	if isGlobalToken(accessToken) {
+		acctURL = accountEndpointBaseGlobal
+		origin = originRefererGlobal
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, acctURL, nil)
+	if err == nil {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+		req.Header.Set("User-Agent", clientUA)
+		if resp, herr := hostHTTPDo(req); herr == nil {
+			// Debug mirror: whether the stateless login/account endpoint is
+			// usable is unverifiable via curl (OAuth bearer required); dump the
+			// raw response when WB_UPSTREAM_DUMP_DIR is set.
+			dumpUpstreamResponse("account_info", http.MethodGet, acctURL, resp.StatusCode, resp.Body)
+			if resp.StatusCode == http.StatusOK {
+				var acct accountData
+				if json.Unmarshal(resp.Body, &acct) == nil {
+					enterpriseID = strings.TrimSpace(acct.EnterpriseID)
+					uid = strings.TrimSpace(acct.UID)
+					nickname = strings.TrimSpace(acct.Nickname)
+					if enterpriseID != "" {
+						return enterpriseID, uid, nickname
+					}
+				}
+			}
+		}
+	}
+	// Fallback: scan the JWT payload for an enterprise claim.
+	if eid, ok := enterpriseClaimFromJWT(accessToken); ok {
+		enterpriseID = eid
+	}
+	return enterpriseID, uid, nickname
+}
+
+// enterpriseClaimFromJWT decodes the access-token JWT payload and scans for
+// an enterprise/org/tenant claim. Key names vary across deployments, so all
+// common variants are probed; only the first hit is returned.
+func enterpriseClaimFromJWT(accessToken string) (string, bool) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return "", false
+	}
+	payload := parts[1]
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	raw, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return "", false
+	}
+	var claims map[string]json.RawMessage
+	if json.Unmarshal(raw, &claims) != nil {
+		return "", false
+	}
+	for _, key := range []string{"enterprise_id", "enterpriseId", "org_id", "orgId", "orgid", "tenant_id", "tenantId"} {
+		v, ok := claims[key]
+		if !ok {
+			continue
+		}
+		var s string
+		if json.Unmarshal(v, &s) == nil && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s), true
+		}
+		var n json.Number
+		if json.Unmarshal(v, &n) == nil && n.String() != "" {
+			return n.String(), true
+		}
+	}
+	return "", false
 }
 
 // preserveExpiry reuses the previous token's expiresAt when the refresh

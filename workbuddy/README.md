@@ -13,8 +13,18 @@ dashboard.
 - **OAuth login** — multi-account `workbuddy-<uid>.json` auth files via the
   host's auth store. CN and Global realms share one plugin, one config block.
 - **Dynamic models** — live model list from the upstream models API with a
-  5-minute cache and a static fallback. Host-side `oauth-model-alias` /
-  `oauth-excluded-models` config applies unchanged.
+  5-minute cache and a static fallback. Enterprise admin-defined custom
+  models (`/console/enterprises/<enterpriseId>/config/models`) are merged in
+  per account — enterprise entries override on ID collision, new IDs are
+  appended — and refreshed proactively every 15 minutes (plus
+  stale-while-error, so a failed refresh never drops models). Inspect the
+  merged state via `GET /v0/management/plugins/workbuddy/models/enterprise`.
+  Host-side `oauth-model-alias` / `oauth-excluded-models` config applies
+  unchanged. To verify the real upstream response shapes (the endpoints
+  require an OAuth bearer and reject curl with 401), set
+  `WB_UPSTREAM_DUMP_DIR=/some/dir` — the raw `config/models` and
+  `login/account` responses are then mirrored to `<dir>/*.json` with request
+  metadata in `<dir>/*.meta.json`.
 - **Executor** — OpenAI-compatible chat completions, both streaming (real SSE
   via `host.stream.emit`) and non-streaming (SSE folded into a single
   completion). `tool_choice` normalization, Claude Code template sanitization,
@@ -126,11 +136,51 @@ plugins:
       # When empty (default) the host's management middleware is the only
       # guard. Also readable from WB_MANAGEMENT_KEY env var.
       management_key: ""
+
+      # Log redacted enterprise custom-model refresh activity (default false).
+      # Identifiers are masked (first 4 chars) and error text is passed
+      # through credential redaction — safe for log aggregation.
+      enterprise_logging: false
 ```
 
 Model aliases and exclusions are handled natively by CPA's
 `oauth-model-alias` and `oauth-excluded-models` config — no plugin-side
 duplication needed.
+
+### Per-credential config (priority / aliases / exclusions)
+
+Each `workbuddy-<uid>.json` auth file also accepts CPA's native
+per-credential keys at its top level:
+
+```json
+{
+  "type": "workbuddy",
+  "priority": 10,
+  "model_aliases": [{"name": "kimi-k2.7", "alias": "k2"}],
+  "excluded_models": ["glm-5v-turbo"],
+  "auth": { "...": "..." },
+  "account": { "...": "..." }
+}
+```
+
+- **`priority`** — scheduling tier (integer, default 0). CPA routes only to
+  the highest tier's pool (round-robin / fill-first inside the tier) and
+  falls to lower tiers when that pool is unavailable — layered failover, not
+  proportional weighting. The plugin's own scheduler (`scheduler_mode:
+  credits`) honors the same tiers. The plugin relays the key to the host at
+  parse time, so it works for plugin credentials exactly like for built-in
+  providers.
+- **`model_aliases`** — per-account client-facing alias → upstream model id
+  (`model-aliases` spelling also accepted).
+- **`excluded_models`** — per-account models hidden from the model list
+  (`excluded-models` spelling also accepted).
+
+Edit them from the panel (account card → **配置**) or by hand; either way
+they survive token keepalive and lifecycle rewrites — the plugin preserves
+these keys across every auth-file save. Panel saves go through
+`POST /v0/management/plugins/workbuddy/accounts/config`
+(`{auth_index, priority?, model_aliases?, excluded_models?}`; an explicit
+`null` clears that key, omitted keys are kept).
 
 ## Lifecycle
 

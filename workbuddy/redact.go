@@ -4,7 +4,10 @@
 // (or truncateRedacted when a length cap is also needed).
 package main
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	redactREBearer  = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
@@ -46,4 +49,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// maskIdentifier masks a semi-sensitive identifier (auth index, enterpriseId,
+// uid) for log output: only the first 4 characters survive. Short values are
+// masked entirely. Not suitable for values that must remain machine-readable —
+// logs only.
+func maskIdentifier(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= 4 {
+		return "***"
+	}
+	return s[:4] + "***"
 }

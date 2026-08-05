@@ -140,6 +140,20 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 		time.Now().Add(time.Duration(tok.ExpiresIn)*time.Second).Unix(),
 		sa.Auth.ExpiresAt,
 	)
+	// Best-effort account enrichment (same as the RPC refresh path): backfill
+	// a login-time-missing enterpriseId/uid and pick up enterprise membership
+	// changes. Never fails the refresh.
+	if eid, uid, nick := enrichAccountFromUpstream(tok.AccessToken); eid != "" || uid != "" || nick != "" {
+		if eid != "" {
+			sa.Account.EnterpriseID = eid
+		}
+		if uid != "" {
+			sa.Account.UID = uid
+		}
+		if nick != "" {
+			sa.Account.Nickname = nick
+		}
+	}
 	if err := persistAuthTokens(authIndex, sa); err != nil {
 		return "error", fmt.Errorf("persist: %w", err)
 	}
@@ -149,6 +163,12 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 // persistAuthTokens writes the updated credential back through the host API.
 // The host's file watcher reloads it; we deliberately do NOT dual-write the
 // physical path (same rule as hostAuthPersist).
+//
+// The rewrite goes through buildAuthFileJSON (not a bare json.Marshal(sa)) so
+// the top-level fields survive: disabled/note are operator/lifecycle state,
+// and the whitelisted extras (priority, model_aliases, excluded_models,
+// prefix) are host-recognized per-credential config that a raw storage dump
+// would silently wipe on every keepalive.
 func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	phys, err := hostAuthGetPhysical(authIndex)
 	if err != nil {
@@ -158,7 +178,12 @@ func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	if name == "" {
 		name = authFileNameFor(sa)
 	}
-	raw, err := json.Marshal(sa)
+	note := ""
+	var doc map[string]any
+	if json.Unmarshal(phys.JSON, &doc) == nil {
+		note, _ = doc["note"].(string)
+	}
+	raw, err := buildAuthFileJSON(sa, phys.Disabled, note, readAuthFileExtras(phys.JSON))
 	if err != nil {
 		return err
 	}

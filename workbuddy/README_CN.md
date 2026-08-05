@@ -110,10 +110,46 @@ plugins:
       # 写端点要求该 Bearer token。空（默认）则只靠宿主 management middleware。
       # 也可从 WB_MANAGEMENT_KEY 环境变量读。
       management_key: ""
+
+      # 记录脱敏后的企业自定义模型刷新日志（默认 false）。
+      # 标识符打码（保留前 4 位），错误文本经凭据脱敏，可安全进入日志采集。
+      enterprise_logging: false
 ```
 
 模型 alias 和排除走 CPA 原生 `oauth-model-alias` 和 `oauth-excluded-models`
 配置，无需插件侧重复。
+
+### 凭据级配置（优先级 / 别名 / 隐藏模型）
+
+每个 `workbuddy-<uid>.json` 凭据文件的顶层还支持 CPA 原生的凭据级键：
+
+```json
+{
+  "type": "workbuddy",
+  "priority": 10,
+  "model_aliases": [{"name": "kimi-k2.7", "alias": "k2"}],
+  "excluded_models": ["glm-5v-turbo"],
+  "auth": { "...": "..." },
+  "account": { "...": "..." }
+}
+```
+
+- **`priority`** — 调度优先级（整数，默认 0）。CPA 只路由到最高优先级
+  池（池内 round-robin / fill-first），池不可用才下落到低优先级——是
+  分层兜底，不是按比例分流。插件自带调度器（`scheduler_mode: credits`）
+  遵循同样的分层。插件在 ParseAuth 时会把该键透传给宿主，插件凭据与
+  内置提供商行为一致。
+- **`model_aliases`** — 按账号的「客户端别名 → 上游模型 ID」映射
+  （也接受 `model-aliases` 写法）。
+- **`excluded_models`** — 按账号隐藏的模型（也接受 `excluded-models`
+  写法）。
+
+可以在面板里编辑（账号卡片 → **配置**），也可以手编 JSON——两种方式
+  都不会被 token keepalive / 生命周期重写抹掉：插件在每次保存凭据文件
+  时都会保留这些键。面板保存走
+  `POST /v0/management/plugins/workbuddy/accounts/config`
+  （body：`{auth_index, priority?, model_aliases?, excluded_models?}`；
+  显式传 `null` 清除对应键，省略的键保持不变）。
 
 ## 生命周期
 

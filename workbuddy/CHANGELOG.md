@@ -1,5 +1,134 @@
 # Changelog
 
+## 0.8.6
+
+### Per-credential config: priority / model_aliases / excluded_models
+
+OAuth credentials are files, not provider config blocks — but CPA natively
+supports per-credential scheduling tiers and model routing on auth files.
+This release makes those usable for workbuddy accounts and stops the plugin
+from wiping them.
+
+- `authfile.go` — new `readAuthFileExtras`: whitelists the host-recognized
+  top-level auth-file keys (`priority`, `model_aliases`/`model-aliases`,
+  `excluded_models`/`excluded-models`, `prefix`) so they can be carried over
+  a rewrite. New `parseAuthFilePriority` / `parseAuthFileConfig` read the
+  effective per-credential config for relay and display.
+- `keepalive.go` — `persistAuthTokens` no longer writes a bare
+  `json.Marshal(sa)` (which silently dropped every top-level field on each
+  22:00 keepalive): it now rebuilds via `buildAuthFileJSON`, preserving
+  `disabled`, `note`, and the whitelisted extras.
+- `lifecycle.go` / `credits_handler.go` — all `buildAuthFileJSON` call sites
+  (disable / re-enable / delete-fallback / note sync / import) now pass the
+  existing file's extras through instead of `nil`.
+- `main.go` — `handleParseAuth` relays the file's top-level `priority` into
+  `AuthData.Attributes["priority"]` (what the host scheduler's `authPriority`
+  actually reads; the host only auto-extracts it for non-plugin files) and
+  into `Metadata` for the host auth list.
+- `scheduler.go` — `scheduler_mode: credits` now honors priority tiers:
+  only the highest tier's candidates participate, lower tiers are tried in
+  order when the tier above is fully exhausted, and the all-exhausted case
+  keeps the legacy sticky behavior. Single-tier (no priority set) behaves
+  exactly as before.
+- `account_config.go` (new) — `POST /v0/management/plugins/workbuddy/accounts/config`:
+  merge per-credential config into the physical auth file
+  (`{auth_index, priority?, model_aliases?, excluded_models?}`; explicit
+  `null` clears a key, omitted keys are kept; kebab-spelled keys are
+  normalized to snake on save).
+- `panel.go` / `panel.html` — account rows expose the effective config;
+  each card gains a **配置** editor (priority input, alias textarea
+  `alias=model` per line, excluded-models textarea) with a `P<n>` badge when
+  a priority is set.
+
+## 0.8.3
+
+### Enterprise custom model list
+
+- `models.go` — new `callEnterpriseModelsAPI` fetches the enterprise
+  admin-defined model list from `{realm-base}/console/enterprises/<enterpriseId>/config/models`
+  (realm routed by JWT `iss`, same as the personal models API). Response is
+  parsed tolerantly (array / `models` / `data` / `data.models` / envelope
+  shapes; camelCase or snake_case context/max-token fields; numbers or
+  numeric strings; `disabled` models skipped).
+- `models.go` — `mergeEnterprise`: enterprise models are merged into the
+  default list per auth; on ID collision the enterprise entry **overrides**
+  (admin-configured), new IDs are appended. Merging happens at return time —
+  the cache holds only the pure enterprise list.
+- `enterprise_refresh.go` (new) — proactive refresh loop started from
+  `configure()` (idempotent): every `enterpriseModelsTTL` (15 min) all
+  accounts' enterprise lists are re-fetched (bounded concurrency), so
+  admin-published model changes surface even when the host never re-queries
+  `model.for_auth`.
+- `enterprise_refresh.go` — stale-while-error: a failed refresh keeps the
+  previously fetched list (models never vanish on a transient upstream
+  failure) and records the error for observability.
+- `management.go` — new `GET /v0/management/plugins/workbuddy/models/enterprise`
+  endpoint: per-account enterprise model list (id/name/context/max_tokens)
+  plus refresh status (`fresh`/`stale`/`error`/`pending`/`no_enterprise`,
+  last fetch time, next refresh, last error).
+- `oauth.go` / `keepalive.go` — `enrichAccountFromUpstream`: after a token
+  refresh the account data (uid/enterpriseId/nickname) is re-fetched
+  best-effort, backfilling logins whose initial account fetch failed and
+  picking up enterprise membership changes. JWT enterprise-claim scan
+  (`enterprise_id`/`org_id`/`tenant_id`…) serves as a no-request fallback.
+- `debug_dump.go` (new) — response-shape verification: set
+  `WB_UPSTREAM_DUMP_DIR` to a writable directory and the raw bodies of the
+  `config/models` and stateless `login/account` responses are mirrored to
+  `<dir>/<name>.json` (+ `.meta.json`). These endpoints cannot be probed
+  with curl (OAuth bearer required, 401 otherwise), so the plugin dumps the
+  responses it receives with a real token. Disabled by default; all failures
+  silent.
+
+### Enterprise custom model list — verified-shape fixes (0.8.3)
+
+Verified against the live upstream and the reference client's
+`ModelsProductProvider`; the following fix the feature for real deployments:
+
+- `models.go` — `extractModelArray` now also accepts the observed upstream
+  shape `{"data":{"data":[...]}}` (double-nested `data`), alongside the
+  array/`models`/`data`/`data.models`/envelope forms.
+- `models.go` — `parseEnterpriseModel` reads the `tags` field; entries whose
+  tags are present but lack `"chat"` are dropped (the reference client only
+  feeds chat-tagged models into the chat agent list). Untagged models stay
+  accepted for shape compatibility.
+- `models.go` — `callEnterpriseModelsAPI` now injects the identity headers
+  the reference client's auth interceptor sends: `X-User-Id` (account uid),
+  `X-Enterprise-Id` and `X-Tenant-Id` (enterpriseId), `X-Domain` (auth
+  domain), alongside the `Authorization: Bearer` header.
+- `enterprise_refresh.go` — new `refreshEnterpriseIfStale` passive path:
+  `model.for_auth` re-syncs an enterprise's model cache when it is missing or
+  past its TTL, so a stale cache refreshes on the next models query instead of
+  waiting for the background tick (matches the reference client's
+  session-load behavior). The background loop remains the safety net.
+- `debug_dump.go` — dumping is now **enabled by default** to
+  `/tmp/workbuddy_upstream_dump` (override with `WB_UPSTREAM_DUMP_DIR`;
+  set it empty to disable), so response-shape problems are observable in the
+  field without extra configuration.
+- `enterprise_refresh.go` — refresh loop logs one summary line per run and a
+  per-account result line; the management status endpoint reports the last
+  run's fetched/failed/skipped counts plus `loop_started` and `dump_dir`.
+- `enterprise_refresh.go` — `enterpriseIDFor`: accounts whose auth file lacks
+  `enterpriseId` fall back to the access token's JWT enterprise claims
+  (`enterprise_id`/`org_id`/`tenant_id`), so legacy auth files pick up
+  enterprise models without waiting for a token refresh. Empty upstream list
+  (`{"code":0,...,"data":[]}`) is a fresh, model_count-0 cache entry — not an
+  error.
+
+### Enterprise custom model — opt-in redacted logging (0.8.3)
+
+- New config `enterprise_logging` (boolean, **default false**): when enabled,
+  the per-refresh enterprise model activity is written to the plugin log.
+  Off by default so no account/enterprise identifiers reach log aggregators
+  without an explicit choice.
+- `redact.go` — new `maskIdentifier`: log identifiers (auth index,
+  enterpriseId, uid) keep only their first 4 characters; error text passes
+  through `redactSecrets` (bearer/JWT/token stripping) before logging.
+- `usage_config.go` / `main.go` — `enterprise_logging` parsed from
+  `plugins.configs.workbuddy` on every register/reconfigure, following the
+  existing `checkin_auto` boolean pattern; registered as a Boolean
+  ConfigField. Log lines, including the refresh-loop summary and
+  `host.auth.list` failures, are gated on it.
+
 ## 0.8.2
 
 ### Concurrency + lifecycle hardening

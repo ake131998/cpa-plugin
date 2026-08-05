@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -206,6 +207,134 @@ func parseDisabledFromAuthJSON(raw []byte) bool {
 	}
 	_ = json.Unmarshal(raw, &m)
 	return m.Disabled
+}
+
+// authFileExtraKeys lists the host-recognized per-credential config keys that
+// live at the auth file's top level (synthesizer/file.go: priority →
+// scheduling tier, model_aliases/excluded_models → per-auth model routing,
+// prefix → model prefix). The plugin owns only
+// type/provider/logo/disabled/note/auth/account — everything in this
+// whitelist must survive plugin rewrites (keepalive, lifecycle, import).
+var authFileExtraKeys = []string{
+	"priority",
+	"model_aliases", "model-aliases",
+	"excluded_models", "excluded-models",
+	"prefix",
+}
+
+// readAuthFileExtras extracts the whitelisted top-level config keys from an
+// existing auth file so buildAuthFileJSON can carry them over a rewrite.
+// Returns nil when the file has none (or is unreadable).
+func readAuthFileExtras(raw []byte) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	var out map[string]any
+	for _, k := range authFileExtraKeys {
+		if v, ok := doc[k]; ok && v != nil {
+			if out == nil {
+				out = make(map[string]any, len(authFileExtraKeys))
+			}
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// parseAuthFilePriority reads the top-level "priority" key the way the host
+// does (number or numeric string; synthesizer/file.go). ok=false when absent
+// or unparseable — callers treat that as priority 0 without writing anything.
+func parseAuthFilePriority(raw []byte) (int, bool) {
+	var doc struct {
+		Priority any `json:"priority"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || doc.Priority == nil {
+		return 0, false
+	}
+	switch v := doc.Priority.(type) {
+	case float64:
+		return int(v), true
+	case string:
+		if p, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return p, true
+		}
+	}
+	return 0, false
+}
+
+// wbModelAlias is one per-credential alias entry (alias → upstream model id).
+type wbModelAlias struct {
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
+}
+
+// parseAuthFileConfig reads the effective per-credential config from an auth
+// file for display/echo: priority (nil when unset), model aliases, and
+// excluded models. Accepts both snake and kebab key spellings, mirroring the
+// host's extractors.
+func parseAuthFileConfig(raw []byte) (priority *int, aliases []wbModelAlias, excluded []string) {
+	if p, ok := parseAuthFilePriority(raw); ok {
+		priority = &p
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return priority, nil, nil
+	}
+	aliases = parseAliasList(doc["model_aliases"])
+	if aliases == nil {
+		aliases = parseAliasList(doc["model-aliases"])
+	}
+	excluded = parseStringList(doc["excluded_models"])
+	if excluded == nil {
+		excluded = parseStringList(doc["excluded-models"])
+	}
+	return priority, aliases, excluded
+}
+
+func parseAliasList(raw any) []wbModelAlias {
+	if raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var list []wbModelAlias
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil
+	}
+	out := list[:0]
+	for _, e := range list {
+		if strings.TrimSpace(e.Name) != "" && strings.TrimSpace(e.Alias) != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func parseStringList(raw any) []string {
+	if raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil
+	}
+	out := list[:0]
+	for _, s := range list {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // isSafeWorkbuddyAuthPath rejects non-workbuddy filenames, empty paths, and
