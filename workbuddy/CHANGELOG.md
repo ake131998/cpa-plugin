@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.8.6
+
+### Per-credential config: priority / model_aliases / excluded_models
+
+OAuth credentials are files, not provider config blocks — but CPA natively
+supports per-credential scheduling tiers and model routing on auth files.
+This release makes those usable for workbuddy accounts and stops the plugin
+from wiping them.
+
+- `authfile.go` — new `readAuthFileExtras`: whitelists the host-recognized
+  top-level auth-file keys (`priority`, `model_aliases`/`model-aliases`,
+  `excluded_models`/`excluded-models`, `prefix`) so they can be carried over
+  a rewrite. New `parseAuthFilePriority` / `parseAuthFileConfig` read the
+  effective per-credential config for relay and display.
+- `keepalive.go` — `persistAuthTokens` no longer writes a bare
+  `json.Marshal(sa)` (which silently dropped every top-level field on each
+  22:00 keepalive): it now rebuilds via `buildAuthFileJSON`, preserving
+  `disabled`, `note`, and the whitelisted extras.
+- `lifecycle.go` / `credits_handler.go` — all `buildAuthFileJSON` call sites
+  (disable / re-enable / delete-fallback / note sync / import) now pass the
+  existing file's extras through instead of `nil`.
+- `main.go` — `handleParseAuth` relays the file's top-level `priority` into
+  `AuthData.Attributes["priority"]` (what the host scheduler's `authPriority`
+  actually reads; the host only auto-extracts it for non-plugin files) and
+  into `Metadata` for the host auth list.
+- `scheduler.go` — `scheduler_mode: credits` now honors priority tiers:
+  only the highest tier's candidates participate, lower tiers are tried in
+  order when the tier above is fully exhausted, and the all-exhausted case
+  keeps the legacy sticky behavior. Single-tier (no priority set) behaves
+  exactly as before.
+- `account_config.go` (new) — `POST /v0/management/plugins/workbuddy/accounts/config`:
+  merge per-credential config into the physical auth file
+  (`{auth_index, priority?, model_aliases?, excluded_models?}`; explicit
+  `null` clears a key, omitted keys are kept; kebab-spelled keys are
+  normalized to snake on save).
+- `panel.go` / `panel.html` — account rows expose the effective config;
+  each card gains a **配置** editor (priority input, alias textarea
+  `alias=model` per line, excluded-models textarea) with a `P<n>` badge when
+  a priority is set.
+
 ## 0.8.3
 
 ### Enterprise custom model list

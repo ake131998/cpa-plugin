@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"sync"
 
@@ -84,23 +85,63 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 
 	// Build thin view for active-auth picker.
-	cands := make([]activeAuthCandidate, 0, len(wbCandidates))
+	buildCands := func(candidates []pluginapi.SchedulerAuthCandidate) []activeAuthCandidate {
+		cands := make([]activeAuthCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			_, exhausted := cachedCreditsScore(c.ID)
+			cands = append(cands, activeAuthCandidate{
+				ID:        c.ID,
+				Disabled:  false, // already filtered
+				Exhausted: exhausted,
+			})
+		}
+		return cands
+	}
+
+	// Honor host priority tiers (candidate.Priority comes from the auth file's
+	// top-level "priority" relayed by ParseAuth): only the highest tier
+	// participates; lower tiers are tried in order when every account in the
+	// tier above is exhausted. This mirrors the built-in conductor's
+	// tier-then-pool semantics. Single-tier (the common no-priority case)
+	// behaves exactly as before.
+	tiers := make(map[int][]pluginapi.SchedulerAuthCandidate, 2)
+	order := make([]int, 0, 2)
 	for _, c := range wbCandidates {
-		_, exhausted := cachedCreditsScore(c.ID)
-		cands = append(cands, activeAuthCandidate{
-			ID:        c.ID,
-			Disabled:  false, // already filtered
-			Exhausted: exhausted,
+		p := c.Priority
+		if _, ok := tiers[p]; !ok {
+			order = append(order, p)
+		}
+		tiers[p] = append(tiers[p], c)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(order)))
+	for _, p := range order {
+		cands := buildCands(tiers[p])
+		usable := false
+		for _, c := range cands {
+			if !c.Exhausted {
+				usable = true
+				break
+			}
+		}
+		if !usable {
+			continue // whole tier exhausted — fall through to the next one
+		}
+		if picked := pickActiveAuth(cands); picked != "" {
+			return okEnvelope(pluginapi.SchedulerPickResponse{
+				AuthID:  picked,
+				Handled: true,
+			})
+		}
+	}
+	// Every tier exhausted: preserve the legacy sticky behavior over the full
+	// pool (pickActiveAuth keeps routing to some account rather than failing).
+	if picked := pickActiveAuth(buildCands(wbCandidates)); picked != "" {
+		return okEnvelope(pluginapi.SchedulerPickResponse{
+			AuthID:  picked,
+			Handled: true,
 		})
 	}
-	picked := pickActiveAuth(cands)
-	if picked == "" {
-		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
-	}
-	return okEnvelope(pluginapi.SchedulerPickResponse{
-		AuthID:  picked,
-		Handled: true,
-	})
+	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 }
 
 // candidateDisabled reports host-disabled auth from Status/metadata.

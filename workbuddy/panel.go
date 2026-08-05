@@ -28,7 +28,11 @@ type wbAccount struct {
 	Credits      *creditsSummary `json:"credits,omitempty"`
 	Checkin      *checkinSummary `json:"checkin,omitempty"`
 	TrialClaimed bool            `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
-	Error        string          `json:"error,omitempty"`
+	// Per-credential config from the auth file top level (host-recognized).
+	Priority       *int           `json:"priority,omitempty"`
+	ModelAliases   []wbModelAlias `json:"model_aliases,omitempty"`
+	ExcludedModels []string       `json:"excluded_models,omitempty"`
+	Error          string         `json:"error,omitempty"`
 }
 
 // credits/checkin/plan fields are left empty — the panel renders skeletons
@@ -92,6 +96,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 				if phys.Name != "" {
 					acct.Name = phys.Name
 				}
+				acct.Priority, acct.ModelAliases, acct.ExcludedModels = parseAuthFileConfig(phys.JSON)
 			}
 			acct.Nickname = sa.Account.Nickname
 			acct.UID = sa.Account.UID

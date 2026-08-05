@@ -147,6 +147,41 @@ Model aliases and exclusions are handled natively by CPA's
 `oauth-model-alias` and `oauth-excluded-models` config — no plugin-side
 duplication needed.
 
+### Per-credential config (priority / aliases / exclusions)
+
+Each `workbuddy-<uid>.json` auth file also accepts CPA's native
+per-credential keys at its top level:
+
+```json
+{
+  "type": "workbuddy",
+  "priority": 10,
+  "model_aliases": [{"name": "kimi-k2.7", "alias": "k2"}],
+  "excluded_models": ["glm-5v-turbo"],
+  "auth": { "...": "..." },
+  "account": { "...": "..." }
+}
+```
+
+- **`priority`** — scheduling tier (integer, default 0). CPA routes only to
+  the highest tier's pool (round-robin / fill-first inside the tier) and
+  falls to lower tiers when that pool is unavailable — layered failover, not
+  proportional weighting. The plugin's own scheduler (`scheduler_mode:
+  credits`) honors the same tiers. The plugin relays the key to the host at
+  parse time, so it works for plugin credentials exactly like for built-in
+  providers.
+- **`model_aliases`** — per-account client-facing alias → upstream model id
+  (`model-aliases` spelling also accepted).
+- **`excluded_models`** — per-account models hidden from the model list
+  (`excluded-models` spelling also accepted).
+
+Edit them from the panel (account card → **配置**) or by hand; either way
+they survive token keepalive and lifecycle rewrites — the plugin preserves
+these keys across every auth-file save. Panel saves go through
+`POST /v0/management/plugins/workbuddy/accounts/config`
+(`{auth_index, priority?, model_aliases?, excluded_models?}`; an explicit
+`null` clears that key, omitted keys are kept).
+
 ## Lifecycle
 
 | State | CN account | Global account |

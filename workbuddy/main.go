@@ -64,6 +64,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -693,6 +694,17 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	ad.ID = "" // let host compute from path (prevents ID mismatch dupes)
 	if fn := strings.TrimSpace(req.FileName); fn != "" {
 		ad.FileName = fn
+	}
+	// Per-credential scheduling tier: the host reads priority from
+	// Attributes["priority"] (selector.go authPriority) but only auto-extracts
+	// it for non-plugin auth files — plugin files must relay it themselves.
+	// Metadata["priority"] additionally surfaces it on the host's auth list.
+	if p, ok := parseAuthFilePriority(req.RawJSON); ok {
+		if ad.Attributes == nil {
+			ad.Attributes = make(map[string]string, 1)
+		}
+		ad.Attributes["priority"] = strconv.Itoa(p)
+		ad.Metadata["priority"] = p
 	}
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,

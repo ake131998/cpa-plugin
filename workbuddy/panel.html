@@ -92,6 +92,12 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .pb-meta{font-size:11px;color:var(--mut);margin-top:6px}
 .actions{margin-top:12px;display:flex;gap:8px}
 .field-input{flex:1;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
+.cfg{margin-top:10px;border-top:1px dashed var(--border);padding-top:10px;font-size:12px}
+.cfg label{display:block;color:var(--mut);margin:8px 0 4px}
+.cfg input,.cfg textarea{width:100%;box-sizing:border-box;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--fg);font:12px/1.45 ui-monospace,monospace;outline:none}
+.cfg input:focus,.cfg textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-ring)}
+.cfg textarea{min-height:54px;resize:vertical}
+.cfg .cfg-actions{margin-top:10px;display:flex;gap:8px}
 /* 右上角滑入通知栈 */
 .toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
 .toast{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--acc);border-radius:var(--radius-md);padding:14px 18px;font-size:13px;box-shadow:var(--toast-shadow);transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;cursor:pointer;word-break:break-all}
@@ -332,8 +338,54 @@ function bindCardActions(root){
       else if(act==="claim") claimTrial(idx, ev.currentTarget);
       else if(act==="select") selectAuth(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
+      else if(act==="config") toggleConfig(ev.currentTarget);
+      else if(act==="saveconfig") saveConfig(idx, ev.currentTarget);
     });
   });
+}
+function toggleConfig(btn){
+  const card=btn.closest(".card");
+  const cfg=card&&card.querySelector(".cfg");
+  if(!cfg) return;
+  cfg.style.display=cfg.style.display==="none"?"":"none";
+}
+async function saveConfig(idx, btn){
+  const card=btn.closest(".card");
+  const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
+  if(!card||!a) return;
+  const priRaw=(card.querySelector(".cfg-priority").value||"").trim();
+  const body={auth_index:idx};
+  if(priRaw===""){
+    body.priority=null; // explicit clear
+  }else{
+    const p=parseInt(priRaw,10);
+    if(isNaN(p)){ toast("优先级必须是整数","err"); return; }
+    body.priority=p;
+  }
+  const aliasLines=(card.querySelector(".cfg-aliases").value||"").split("\n").map(l=>l.trim()).filter(Boolean);
+  const aliases=[];
+  for(const l of aliasLines){
+    const i=l.indexOf("=");
+    if(i<=0||!l.slice(i+1).trim()){ toast("别名格式应为：别名=真实模型ID","err",l); return; }
+    aliases.push({alias:l.slice(0,i).trim(),name:l.slice(i+1).trim()});
+  }
+  body.model_aliases=aliases.length?aliases:null;
+  const excl=(card.querySelector(".cfg-excluded").value||"").split("\n").map(l=>l.trim()).filter(Boolean);
+  body.excluded_models=excl.length?excl:null;
+  busy(btn,true);
+  try{
+    const d=await api("/accounts/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!d||d.success===false){ toast("保存配置失败","err",(d&&d.error)||""); return; }
+    if(d.priority!=null) a.priority=d.priority; else delete a.priority;
+    a.model_aliases=d.model_aliases||[];
+    a.excluded_models=d.excluded_models||[];
+    toast("配置已保存","ok","调度分层 / 别名在宿主重载凭据后生效（约数秒）");
+    updateOneCard(a);
+  }catch(e){
+    toast("保存配置失败","err",e&&e.message?e.message:"");
+  }finally{
+    busy(btn,false);
+  }
 }
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
@@ -363,13 +415,27 @@ function card(a){
     ? `<button class="done" disabled="disabled">使用中</button>`
     : (disabled?``:`<button class="sec" data-action="select" data-auth-index="${esc(a.auth_index)}">选用</button>`);
   const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${esc(a.auth_index)}" title="刷新积分">刷新</button>`;
-  const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
+  const configBtn=`<button class="sec" data-action="config" data-auth-index="${esc(a.auth_index)}" title="优先级 / 模型别名 / 隐藏模型">配置</button>`;
+  const priBadge=a.priority!=null?`<span class="badge" title="调度优先级：高优先级池先用，同层轮询">P${a.priority}</span>`:"";
+  const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+priBadge+regionBadge+`<span class="badge ${plan}">${esc(a.plan||"-")}</span>`;
+  const aliasesText=(a.model_aliases||[]).map(e=>`${e.alias}=${e.name}`).join("\n");
+  const exclText=(a.excluded_models||[]).join("\n");
+  const cfgHTML=`<div class="cfg" style="display:none">
+  <label>调度优先级（整数，越大越优先；留空保存 = 清除）</label>
+  <input class="cfg-priority" type="number" step="1" placeholder="0" value="${a.priority!=null?esc(String(a.priority)):""}">
+  <label>模型别名（每行一条：别名=真实模型ID；留空保存 = 清除）</label>
+  <textarea class="cfg-aliases" placeholder="k2=kimi-k2.7">${esc(aliasesText)}</textarea>
+  <label>隐藏模型（每行一个模型ID；留空保存 = 清除）</label>
+  <textarea class="cfg-excluded" placeholder="glm-5v-turbo">${esc(exclText)}</textarea>
+  <div class="cfg-actions"><button class="sec" data-action="saveconfig" data-auth-index="${esc(a.auth_index)}">保存配置</button></div>
+  </div>`;
   return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr, a.error)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
-  <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
+  <div class="actions">${selectBtn}${refreshBtn}${actionHTML}${configBtn}</div>
+  ${cfgHTML}
   </div>`;
 }
 let currentFilter="all";

@@ -32,7 +32,9 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
 	// Persist nested storage + top-level type/note/logo/disabled for Auth page.
-	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
+	// Carry over whitelisted extras (priority, model_aliases, ...) when the
+	// imported payload itself declares them at top level.
+	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), readAuthFileExtras(raw))
 	if err != nil {
 		return map[string]any{"success": false, "error": err.Error()}
 	}
