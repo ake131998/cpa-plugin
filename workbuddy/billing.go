@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -260,6 +261,17 @@ func packageRemainUsed(a resourcePackage) (remain, used, size int64) {
 }
 
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
+	// Enterprise accounts (EnterpriseID set) hold their balance under the
+	// enterprise usage endpoint; get-user-resource returns an empty Accounts
+	// list for them, which made the panel's usage card show all zeros even
+	// though chat worked. Mirrors the official web client: enterpriseId
+	// present → enterprise branch. Fall through to the personal-pack endpoint
+	// if the enterprise call itself fails.
+	if sa != nil && strings.TrimSpace(sa.Account.EnterpriseID) != "" {
+		if sum, err := fetchEnterpriseUsage(sa); err == nil {
+			return sum, nil
+		}
+	}
 	now := time.Now()
 	// Status 0=active, 3=exhausted-but-still-listed. PageSize 100 covers the
 	// multi-pack free accounts we see in production; paginate if TotalCount
@@ -332,6 +344,52 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 		}
 	}
 	_ = resp.Response.Data.TotalCount
+	return sum, nil
+}
+
+// fetchEnterpriseUsage queries the enterprise quota endpoint. Wire shape
+// (camelCase, verified 2026-08 against codebuddy.cn):
+//
+//	{"credit":94866.03,"limitNum":-1,"cycleStartTime":"2026-07-16 00:00:00",
+//	 "cycleEndTime":"2026-08-15 23:59:59","cycleResetTime":"2026-08-16 00:00:00"}
+//
+// credit is the remaining balance. limitNum == -1 means the cycle pool is
+// unlimited — we leave TotalSize at 0 (the panel renders 额度池 as "-")
+// rather than inventing a capacity. A positive limitNum is a finite pool and
+// used = limit − remain.
+func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
+	data, err := billingCall(sa, "/v2/billing/meter/get-enterprise-user-usage", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Credit         float64 `json:"credit"`
+		LimitNum       int64   `json:"limitNum"`
+		CycleStartTime string  `json:"cycleStartTime"`
+		CycleEndTime   string  `json:"cycleEndTime"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	remain := int64(math.Round(resp.Credit))
+	if remain < 0 {
+		remain = 0
+	}
+	sum := &creditsSummary{TotalRemain: remain, PackCount: 1}
+	if resp.LimitNum > 0 {
+		sum.TotalSize = resp.LimitNum
+		if used := resp.LimitNum - remain; used > 0 {
+			sum.TotalUsed = used
+		}
+	}
+	sum.Packages = []packageSummary{{
+		Name:       "企业套餐",
+		Remain:     remain,
+		Used:       sum.TotalUsed,
+		Size:       sum.TotalSize,
+		CycleStart: resp.CycleStartTime,
+		CycleEnd:   resp.CycleEndTime,
+	}}
 	return sum, nil
 }
 
