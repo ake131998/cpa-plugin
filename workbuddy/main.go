@@ -704,7 +704,16 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 			ad.Attributes = make(map[string]string, 1)
 		}
 		ad.Attributes["priority"] = strconv.Itoa(p)
-		ad.Metadata["priority"] = p
+	}
+	// Relay the full per-credential config (priority, model_aliases,
+	// excluded_models, prefix) into Metadata: CPA rewrites the auth file on
+	// every token refresh as StorageJSON+Metadata (FileTokenStore.Save →
+	// mergedStorageJSON), so anything not relayed here is wiped from the file
+	// on the next refresh — taking the routing attributes down with it when
+	// the watcher re-synthesizes. See authConfigMetadataKeys.
+	relayAuthConfigExtras(ad.Metadata, authConfigExtrasMetadata(req.RawJSON))
+	if prefix, ok := parseAuthFilePrefix(req.RawJSON); ok {
+		ad.Prefix = prefix // pluginAuthDataToCoreAuth reads Prefix from AuthData, not Metadata
 	}
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
