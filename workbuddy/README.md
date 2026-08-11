@@ -20,11 +20,7 @@ dashboard.
   stale-while-error, so a failed refresh never drops models). Inspect the
   merged state via `GET /v0/management/plugins/workbuddy/models/enterprise`.
   Host-side `oauth-model-alias` / `oauth-excluded-models` config applies
-  unchanged. To verify the real upstream response shapes (the endpoints
-  require an OAuth bearer and reject curl with 401), set
-  `WB_UPSTREAM_DUMP_DIR=/some/dir` — the raw `config/models` and
-  `login/account` responses are then mirrored to `<dir>/*.json` with request
-  metadata in `<dir>/*.meta.json`.
+  unchanged.
 - **Executor** — OpenAI-compatible chat completions, both streaming (real SSE
   via `host.stream.emit`) and non-streaming (SSE folded into a single
   completion). `tool_choice` normalization, Claude Code template sanitization,

@@ -21,6 +21,16 @@ misleading 已用 0 · 0%.
   credits paths (`panel.go` dashboard, `credits_handler.go` single-account
   query) apply the estimate.
 
+### Security: upstream response dump removed
+
+- `debug_dump.go` / `debug_dump_test.go` deleted, along with every call site
+  (`models.go` personal + enterprise models, `oauth.go` account_info) and the
+  `dump_dir` field in the enterprise models status endpoint
+  (`enterprise_refresh.go`). Raw upstream bodies — including the login/account
+  lookup, which carries user profile data — are no longer mirrored to
+  `/tmp/workbuddy_upstream_dump`; `WB_UPSTREAM_DUMP_DIR` is gone from
+  `README.md` accordingly. Historical CHANGELOG entries are left as-is.
+
 ## 0.8.6
 
 ### Per-credential config: priority / model_aliases / excluded_models
