@@ -103,6 +103,13 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 			acct.Region = accountRegion(sa)
 			if fetchCredits {
 				plan, ci, cr, errs := cachedAccountDetails(f.ID, sa, force)
+				// Unlimited enterprise pools: estimate used from the persisted
+				// cycle baseline; stash a pending baseline for syncAuthNote.
+				if phys != nil {
+					if extra, dirty := applyCycleBaseline(cr, phys.JSON); dirty && cr != nil {
+						cr.cycleExtra = extra
+					}
+				}
 				acct.Plan = plan
 				acct.Checkin = ci
 				acct.Credits = cr

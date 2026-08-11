@@ -207,7 +207,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			if f.AuthIndex != authIndex {
 				continue
 			}
-			sa, err := hostAuthGet(f.AuthIndex)
+			sa, phys, err := hostAuthGetBundle(f.AuthIndex)
 			if err != nil {
 				return map[string]any{"accounts": []map[string]any{{
 					"auth_index": authIndex, "error": "load auth: " + err.Error(),
@@ -227,6 +227,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			if err != nil {
 				acct["error"] = err.Error()
 			} else {
+				// Unlimited enterprise pools: estimate used from the persisted
+				// cycle baseline (same as the dashboard path).
+				if phys != nil {
+					if extra, dirty := applyCycleBaseline(cr, phys.JSON); dirty && cr != nil {
+						cr.cycleExtra = extra
+					}
+				}
 				acct["credits"] = cr
 				acct["exhausted"] = isCreditsExhausted(cr)
 				if isGlobalDomain(sa.Auth.Domain) {

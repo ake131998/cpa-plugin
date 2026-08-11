@@ -354,9 +354,9 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 //	 "cycleEndTime":"2026-08-15 23:59:59","cycleResetTime":"2026-08-16 00:00:00"}
 //
 // credit is the remaining balance. limitNum == -1 means the cycle pool is
-// unlimited — we leave TotalSize at 0 (the panel renders 额度池 as "-")
-// rather than inventing a capacity. A positive limitNum is a finite pool and
-// used = limit − remain.
+// unlimited — we leave TotalSize/TotalUsed at 0 and mark the summary
+// Unlimited so the panel renders 已用/额度池 as "—" instead of a
+// misleading 0. A positive limitNum is a finite pool and used = limit − remain.
 func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
 	data, err := billingCall(sa, "/v2/billing/meter/get-enterprise-user-usage", nil)
 	if err != nil {
@@ -381,6 +381,8 @@ func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
 		if used := resp.LimitNum - remain; used > 0 {
 			sum.TotalUsed = used
 		}
+	} else {
+		sum.Unlimited = true
 	}
 	sum.Packages = []packageSummary{{
 		Name:       "企业套餐",
@@ -391,6 +393,48 @@ func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
 		CycleEnd:   resp.CycleEndTime,
 	}}
 	return sum, nil
+}
+
+// authExtraCycleKey is the auth-file top-level key holding the unlimited-pool
+// cycle baseline: {"start": "<cycleStartTime>", "credit": <balance at first
+// observation>}. Persisted via the normal auth rewrite path (syncAuthNote) so
+// the baseline survives plugin restarts.
+const authExtraCycleKey = "wb_cycle"
+
+// applyCycleBaseline fills TotalUsed for unlimited enterprise pools (upstream
+// sends no used field) from a cycle-start credit baseline kept in the auth
+// file extras. Stateless: re-derived from physJSON on every call. When the
+// stored baseline is missing, belongs to an older cycle, or sits below the
+// current balance (mid-cycle top-up), the current balance becomes the new
+// baseline and the caller should persist the returned extras (dirty=true);
+// used then reads as 0 for that round and grows as the balance drops. Top-ups
+// re-baseline, so the figure is a lower bound on true consumption.
+func applyCycleBaseline(cr *creditsSummary, physJSON []byte) (map[string]any, bool) {
+	if cr == nil || !cr.Unlimited || len(cr.Packages) == 0 {
+		return nil, false
+	}
+	start := strings.TrimSpace(cr.Packages[0].CycleStart)
+	if start == "" {
+		return nil, false
+	}
+	cur := cr.TotalRemain
+	base := int64(-1)
+	if len(physJSON) > 0 {
+		var doc struct {
+			Cycle struct {
+				Start  string  `json:"start"`
+				Credit float64 `json:"credit"`
+			} `json:"wb_cycle"`
+		}
+		if json.Unmarshal(physJSON, &doc) == nil && doc.Cycle.Start == start {
+			base = int64(math.Round(doc.Cycle.Credit))
+		}
+	}
+	if base < cur {
+		return map[string]any{"start": start, "credit": cur}, true
+	}
+	cr.TotalUsed = base - cur
+	return map[string]any{"start": start, "credit": base}, false
 }
 
 func fetchPaymentType(sa *storedAuth) string {

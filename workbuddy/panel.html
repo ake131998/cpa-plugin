@@ -320,11 +320,21 @@ function progressHTML(c, err){
   // no active package). Previously all-zero was mistaken for "still loading",
   // leaving the progress bar spinning forever.
   const remain=c.total_remain||0, used=c.total_used||0;
+  const when=c.fetched_at?` · 快照 ${esc(String(c.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
+  // Unlimited enterprise pool (limitNum=-1): upstream sends no used field and
+  // no finite capacity. TotalUsed is a local estimate from the persisted
+  // cycle-start baseline (0/ absent until the balance drops); show "—" only
+  // when no estimate exists yet.
+  if(c.unlimited){
+    const est=used>0;
+    const usedTxt=est?`${used}（约）`:"—";
+    const why=est?"（按周期起点余额推算，充值后重新起算）":"（不限量池上游不下发已用）";
+    return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${usedTxt} · 不限量池</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--ok)"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${usedTxt}${why} · 额度池 —${when}</div></div>`;
+  }
   const size=c.total_size||(remain+used);
   const total=size>0?size:(remain+used);
   const pct=total>0?Math.round(used/total*100):0;
   let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85)color='var(--err)';
-  const when=c.fetched_at?` · 快照 ${esc(String(c.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
   return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${used} · ${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total}${c.pack_count?` · ${c.pack_count} 个包`:''}${when}</div></div>`;
 }
 function bindCardActions(root){

@@ -261,6 +261,14 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if err == nil {
 		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 		extras = readAuthFileExtras(phys.JSON)
+		// Persist a pending unlimited-pool cycle baseline (applyCycleBaseline)
+		// alongside the note rewrite so the estimate survives restarts.
+		if cr != nil && len(cr.cycleExtra) > 0 {
+			if extras == nil {
+				extras = map[string]any{}
+			}
+			extras[authExtraCycleKey] = cr.cycleExtra
+		}
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
 		note = displayNote(sa, cr, disabled)

@@ -38,6 +38,13 @@ type creditsSummary struct {
 	TotalSize int64 `json:"total_size"`
 	// PackCount is number of resource packages included in the aggregate.
 	PackCount int `json:"pack_count"`
+	// Unlimited marks an enterprise pool with limitNum=-1: the upstream wire
+	// carries no used field and no finite capacity, so TotalUsed is genuinely
+	// unknown (not zero). The panel renders 已用 as "—" instead of a lying 0.
+	Unlimited bool `json:"unlimited,omitempty"`
+	// cycleExtra carries a pending wb_cycle baseline (applyCycleBaseline) to
+	// the next auth-file rewrite (syncAuthNote). Unexported: never serialized.
+	cycleExtra map[string]any
 	// FetchedAt is when this snapshot was taken (RFC3339). Upstream billing lag
 	// can make remain/used look "stuck" for minutes after chat; compare this
 	// timestamp — not only the numbers — when diagnosing frozen credits.

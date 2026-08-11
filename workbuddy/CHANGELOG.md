@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Enterprise unlimited pool: honest + locally estimated "used"
+
+Enterprise accounts with `limitNum=-1` (unlimited cycle pool) have no used
+field on the `get-enterprise-user-usage` wire — the panel previously showed a
+misleading 已用 0 · 0%.
+
+- `management.go` — `creditsSummary.Unlimited` marks the unlimited pool; the
+  panel renders 已用/额度池 as "—" instead of 0 (`panel.html` `progressHTML`),
+  and the auth note shows `已用— 不限量池` (`policy.go` `displayNote`).
+- `billing.go` — new `applyCycleBaseline`: estimates cycle used as
+  `baseline credit − current credit`. The baseline lives in the auth file's
+  top-level `wb_cycle` key (added to the `authFileExtraKeys` rewrite
+  whitelist in `authfile.go`), is re-derived statelessly on every fetch, and
+  re-baselines on cycle rollover or mid-cycle top-up (so the figure is a
+  lower bound on true consumption). Pending baselines are persisted through
+  the existing throttled `syncAuthNote` rewrite (`lifecycle.go`); both fresh
+  credits paths (`panel.go` dashboard, `credits_handler.go` single-account
+  query) apply the estimate.
+
 ## 0.8.6
 
 ### Per-credential config: priority / model_aliases / excluded_models

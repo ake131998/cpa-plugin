@@ -49,6 +49,9 @@ func TestFetchUserResource_EnterpriseUnlimited(t *testing.T) {
 	if sum.TotalSize != 0 || sum.TotalUsed != 0 {
 		t.Fatalf("unlimited pool must keep size/used at 0, got size=%d used=%d", sum.TotalSize, sum.TotalUsed)
 	}
+	if !sum.Unlimited {
+		t.Fatal("limitNum=-1 must mark the summary Unlimited")
+	}
 	if len(sum.Packages) != 1 || sum.Packages[0].CycleEnd != "2026-08-15 23:59:59" {
 		t.Fatalf("packages=%+v", sum.Packages)
 	}
@@ -74,6 +77,9 @@ func TestFetchUserResource_EnterpriseFinitePool(t *testing.T) {
 	if sum.TotalRemain != 300 || sum.TotalUsed != 700 || sum.TotalSize != 1000 {
 		t.Fatalf("remain=%d used=%d size=%d, want 300/700/1000", sum.TotalRemain, sum.TotalUsed, sum.TotalSize)
 	}
+	if sum.Unlimited {
+		t.Fatal("finite limitNum must not mark the summary Unlimited")
+	}
 }
 
 // TestFetchUserResource_EnterpriseFallsBackOnError: when the enterprise call
@@ -96,5 +102,87 @@ func TestFetchUserResource_EnterpriseFallsBackOnError(t *testing.T) {
 	}
 	if sum.TotalRemain != 499 || sum.TotalUsed != 1 || sum.TotalSize != 500 {
 		t.Fatalf("remain=%d used=%d size=%d, want 499/1/500", sum.TotalRemain, sum.TotalUsed, sum.TotalSize)
+	}
+}
+
+// --- applyCycleBaseline -----------------------------------------------------
+
+func unlimitedSummary(remain int64, cycleStart string) *creditsSummary {
+	return &creditsSummary{
+		TotalRemain: remain,
+		PackCount:   1,
+		Unlimited:   true,
+		Packages:    []packageSummary{{Name: "企业套餐", Remain: remain, CycleStart: cycleStart}},
+	}
+}
+
+// First observation (no wb_cycle in the auth file): current balance becomes
+// the baseline, dirty=true, used stays 0 until the balance drops.
+func TestApplyCycleBaseline_FirstObservation(t *testing.T) {
+	cr := unlimitedSummary(100694, "2026-07-16 00:00:00")
+	extra, dirty := applyCycleBaseline(cr, []byte(`{"type":"workbuddy"}`))
+	if !dirty {
+		t.Fatal("missing baseline must be dirty")
+	}
+	if extra["start"] != "2026-07-16 00:00:00" || extra["credit"] != int64(100694) {
+		t.Fatalf("extra=%+v", extra)
+	}
+	if cr.TotalUsed != 0 {
+		t.Fatalf("used=%d want 0 on first observation", cr.TotalUsed)
+	}
+}
+
+// Stored baseline above the current balance → used = baseline − remain, and
+// the baseline is persisted as-is (dirty=false).
+func TestApplyCycleBaseline_UsedFromBaseline(t *testing.T) {
+	cr := unlimitedSummary(99000, "2026-07-16 00:00:00")
+	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
+	extra, dirty := applyCycleBaseline(cr, phys)
+	if dirty {
+		t.Fatal("matching baseline must not be dirty")
+	}
+	if cr.TotalUsed != 1694 {
+		t.Fatalf("used=%d want 1694", cr.TotalUsed)
+	}
+	if extra["credit"] != int64(100694) {
+		t.Fatalf("extra=%+v", extra)
+	}
+}
+
+// A new cycle (cycleStartTime rolled) invalidates the old baseline.
+func TestApplyCycleBaseline_NewCycleRebaselines(t *testing.T) {
+	cr := unlimitedSummary(120000, "2026-08-16 00:00:00")
+	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
+	extra, dirty := applyCycleBaseline(cr, phys)
+	if !dirty || extra["start"] != "2026-08-16 00:00:00" {
+		t.Fatalf("dirty=%v extra=%+v", dirty, extra)
+	}
+	if cr.TotalUsed != 0 {
+		t.Fatalf("used=%d want 0 on re-baseline", cr.TotalUsed)
+	}
+}
+
+// Mid-cycle top-up (credit went UP) re-baselines so used never goes negative.
+func TestApplyCycleBaseline_TopUpRebaselines(t *testing.T) {
+	cr := unlimitedSummary(150000, "2026-07-16 00:00:00")
+	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
+	if _, dirty := applyCycleBaseline(cr, phys); !dirty {
+		t.Fatal("top-up must re-baseline")
+	}
+	if cr.TotalUsed != 0 {
+		t.Fatalf("used=%d want 0 after top-up re-baseline", cr.TotalUsed)
+	}
+}
+
+// Non-unlimited summaries and missing cycle anchors are ignored.
+func TestApplyCycleBaseline_SkipsNonUnlimited(t *testing.T) {
+	if _, dirty := applyCycleBaseline(&creditsSummary{TotalRemain: 10}, nil); dirty {
+		t.Fatal("non-unlimited summary must not be touched")
+	}
+	if _, dirty := applyCycleBaseline(unlimitedSummary(10, ""), nil); dirty {
+		t.Fatal("empty cycle start must not be baselined")
+	}
+	if _, dirty := applyCycleBaseline(nil, nil); dirty {
+		t.Fatal("nil summary must not be touched")
 	}
 }

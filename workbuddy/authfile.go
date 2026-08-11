@@ -209,17 +209,18 @@ func parseDisabledFromAuthJSON(raw []byte) bool {
 	return m.Disabled
 }
 
-// authFileExtraKeys lists the host-recognized per-credential config keys that
-// live at the auth file's top level (synthesizer/file.go: priority →
-// scheduling tier, model_aliases/excluded_models → per-auth model routing,
-// prefix → model prefix). The plugin owns only
-// type/provider/logo/disabled/note/auth/account — everything in this
-// whitelist must survive plugin rewrites (keepalive, lifecycle, import).
+// authFileExtraKeys lists the top-level keys that must survive plugin rewrites
+// (keepalive, lifecycle, import): host-recognized per-credential config keys
+// (synthesizer/file.go: priority → scheduling tier, model_aliases/
+// excluded_models → per-auth model routing, prefix → model prefix) plus the
+// plugin-private wb_cycle baseline used for unlimited-pool used estimation.
+// The plugin owns only type/provider/logo/disabled/note/auth/account.
 var authFileExtraKeys = []string{
 	"priority",
 	"model_aliases", "model-aliases",
 	"excluded_models", "excluded-models",
 	"prefix",
+	"wb_cycle",
 }
 
 // readAuthFileExtras extracts the whitelisted top-level config keys from an
