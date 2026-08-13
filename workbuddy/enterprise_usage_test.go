@@ -27,7 +27,10 @@ func enterpriseBillingServer(t *testing.T, entBody, personalBody string) *httpte
 // TestFetchUserResource_EnterpriseUnlimited reproduces the 2026-08 production
 // bug: enterprise accounts get an empty Accounts list from get-user-resource
 // (panel usage card showed all zeros) while their real balance lives under
-// get-enterprise-user-usage. limitNum=-1 means unlimited → size stays 0.
+// get-enterprise-user-usage. limitNum=-1 means unlimited (不限量): credit is
+// the cycle CONSUMPTION (matches 已使用 in the official console), recorded as
+// TotalUsed with the Unlimited flag — never as remain, which both mislabeled
+// usage as 剩余额度 and (via remain=0) risked a false 耗尽/exhausted verdict.
 func TestFetchUserResource_EnterpriseUnlimited(t *testing.T) {
 	srv := enterpriseBillingServer(t,
 		`{"code":0,"msg":"OK","data":{"credit":94866.03,"limitNum":-1,"cycleStartTime":"2026-07-16 00:00:00","cycleEndTime":"2026-08-15 23:59:59","cycleResetTime":"2026-08-16 00:00:00"}}`,
@@ -43,16 +46,19 @@ func TestFetchUserResource_EnterpriseUnlimited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchUserResource: %v", err)
 	}
-	if sum.TotalRemain != 94866 {
-		t.Fatalf("remain=%d want 94866", sum.TotalRemain)
-	}
-	if sum.TotalSize != 0 || sum.TotalUsed != 0 {
-		t.Fatalf("unlimited pool must keep size/used at 0, got size=%d used=%d", sum.TotalSize, sum.TotalUsed)
-	}
 	if !sum.Unlimited {
 		t.Fatal("limitNum=-1 must mark the summary Unlimited")
 	}
-	if len(sum.Packages) != 1 || sum.Packages[0].CycleEnd != "2026-08-15 23:59:59" {
+	if sum.TotalUsed != 94866 {
+		t.Fatalf("used=%d want 94866 (credit is consumption for unlimited plans)", sum.TotalUsed)
+	}
+	if sum.TotalRemain != 0 || sum.TotalSize != 0 {
+		t.Fatalf("unlimited pool must keep remain/size at 0, got remain=%d size=%d", sum.TotalRemain, sum.TotalSize)
+	}
+	if isCreditsExhausted(sum) {
+		t.Fatal("unlimited plan must never be exhausted despite remain=0")
+	}
+	if len(sum.Packages) != 1 || sum.Packages[0].Used != 94866 || sum.Packages[0].CycleEnd != "2026-08-15 23:59:59" {
 		t.Fatalf("packages=%+v", sum.Packages)
 	}
 }
@@ -77,9 +83,6 @@ func TestFetchUserResource_EnterpriseFinitePool(t *testing.T) {
 	if sum.TotalRemain != 300 || sum.TotalUsed != 700 || sum.TotalSize != 1000 {
 		t.Fatalf("remain=%d used=%d size=%d, want 300/700/1000", sum.TotalRemain, sum.TotalUsed, sum.TotalSize)
 	}
-	if sum.Unlimited {
-		t.Fatal("finite limitNum must not mark the summary Unlimited")
-	}
 }
 
 // TestFetchUserResource_EnterpriseFallsBackOnError: when the enterprise call
@@ -102,87 +105,5 @@ func TestFetchUserResource_EnterpriseFallsBackOnError(t *testing.T) {
 	}
 	if sum.TotalRemain != 499 || sum.TotalUsed != 1 || sum.TotalSize != 500 {
 		t.Fatalf("remain=%d used=%d size=%d, want 499/1/500", sum.TotalRemain, sum.TotalUsed, sum.TotalSize)
-	}
-}
-
-// --- applyCycleBaseline -----------------------------------------------------
-
-func unlimitedSummary(remain int64, cycleStart string) *creditsSummary {
-	return &creditsSummary{
-		TotalRemain: remain,
-		PackCount:   1,
-		Unlimited:   true,
-		Packages:    []packageSummary{{Name: "企业套餐", Remain: remain, CycleStart: cycleStart}},
-	}
-}
-
-// First observation (no wb_cycle in the auth file): current balance becomes
-// the baseline, dirty=true, used stays 0 until the balance drops.
-func TestApplyCycleBaseline_FirstObservation(t *testing.T) {
-	cr := unlimitedSummary(100694, "2026-07-16 00:00:00")
-	extra, dirty := applyCycleBaseline(cr, []byte(`{"type":"workbuddy"}`))
-	if !dirty {
-		t.Fatal("missing baseline must be dirty")
-	}
-	if extra["start"] != "2026-07-16 00:00:00" || extra["credit"] != int64(100694) {
-		t.Fatalf("extra=%+v", extra)
-	}
-	if cr.TotalUsed != 0 {
-		t.Fatalf("used=%d want 0 on first observation", cr.TotalUsed)
-	}
-}
-
-// Stored baseline above the current balance → used = baseline − remain, and
-// the baseline is persisted as-is (dirty=false).
-func TestApplyCycleBaseline_UsedFromBaseline(t *testing.T) {
-	cr := unlimitedSummary(99000, "2026-07-16 00:00:00")
-	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
-	extra, dirty := applyCycleBaseline(cr, phys)
-	if dirty {
-		t.Fatal("matching baseline must not be dirty")
-	}
-	if cr.TotalUsed != 1694 {
-		t.Fatalf("used=%d want 1694", cr.TotalUsed)
-	}
-	if extra["credit"] != int64(100694) {
-		t.Fatalf("extra=%+v", extra)
-	}
-}
-
-// A new cycle (cycleStartTime rolled) invalidates the old baseline.
-func TestApplyCycleBaseline_NewCycleRebaselines(t *testing.T) {
-	cr := unlimitedSummary(120000, "2026-08-16 00:00:00")
-	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
-	extra, dirty := applyCycleBaseline(cr, phys)
-	if !dirty || extra["start"] != "2026-08-16 00:00:00" {
-		t.Fatalf("dirty=%v extra=%+v", dirty, extra)
-	}
-	if cr.TotalUsed != 0 {
-		t.Fatalf("used=%d want 0 on re-baseline", cr.TotalUsed)
-	}
-}
-
-// Mid-cycle top-up (credit went UP) re-baselines so used never goes negative.
-func TestApplyCycleBaseline_TopUpRebaselines(t *testing.T) {
-	cr := unlimitedSummary(150000, "2026-07-16 00:00:00")
-	phys := []byte(`{"wb_cycle":{"start":"2026-07-16 00:00:00","credit":100694}}`)
-	if _, dirty := applyCycleBaseline(cr, phys); !dirty {
-		t.Fatal("top-up must re-baseline")
-	}
-	if cr.TotalUsed != 0 {
-		t.Fatalf("used=%d want 0 after top-up re-baseline", cr.TotalUsed)
-	}
-}
-
-// Non-unlimited summaries and missing cycle anchors are ignored.
-func TestApplyCycleBaseline_SkipsNonUnlimited(t *testing.T) {
-	if _, dirty := applyCycleBaseline(&creditsSummary{TotalRemain: 10}, nil); dirty {
-		t.Fatal("non-unlimited summary must not be touched")
-	}
-	if _, dirty := applyCycleBaseline(unlimitedSummary(10, ""), nil); dirty {
-		t.Fatal("empty cycle start must not be baselined")
-	}
-	if _, dirty := applyCycleBaseline(nil, nil); dirty {
-		t.Fatal("nil summary must not be touched")
 	}
 }

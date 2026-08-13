@@ -102,6 +102,9 @@ func TestShouldReenableCN(t *testing.T) {
 	if !shouldReenableCN(true, &creditsSummary{TotalRemain: 3}) {
 		t.Fatal("disabled + remain should reenable")
 	}
+	if !shouldReenableCN(true, &creditsSummary{Unlimited: true, TotalUsed: 500}) {
+		t.Fatal("disabled + unlimited should reenable (remain=0 by definition)")
+	}
 }
 
 func TestDisplayNote(t *testing.T) {
@@ -114,6 +117,10 @@ func TestDisplayNote(t *testing.T) {
 	note = displayNote(gl, &creditsSummary{TotalRemain: 0, TotalUsed: 250, TotalSize: 250}, false)
 	if !strings.Contains(note, "Global") || !strings.Contains(note, "耗尽") {
 		t.Fatalf("global note = %q", note)
+	}
+	note = displayNote(cn, &creditsSummary{Unlimited: true, TotalUsed: 94866}, false)
+	if !strings.Contains(note, "不限量") || !strings.Contains(note, "94866") {
+		t.Fatalf("unlimited note = %q", note)
 	}
 	note = displayNote(cn, &creditsSummary{TotalRemain: 0, TotalUsed: 5}, true)
 	if !strings.Contains(note, "禁用") && !strings.Contains(strings.ToLower(note), "disabled") {

@@ -321,15 +321,9 @@ function progressHTML(c, err){
   // leaving the progress bar spinning forever.
   const remain=c.total_remain||0, used=c.total_used||0;
   const when=c.fetched_at?` · 快照 ${esc(String(c.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
-  // Unlimited enterprise pool (limitNum=-1): upstream sends no used field and
-  // no finite capacity. TotalUsed is a local estimate from the persisted
-  // cycle-start baseline (0/ absent until the balance drops); show "—" only
-  // when no estimate exists yet.
+  // Unlimited enterprise plan: no remaining/pool numbers exist — only usage.
   if(c.unlimited){
-    const est=used>0;
-    const usedTxt=est?`${used}（约）`:"—";
-    const why=est?"（按周期起点余额推算，充值后重新起算）":"（不限量池上游不下发已用）";
-    return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${usedTxt} · 不限量池</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--ok)"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${usedTxt}${why} · 额度池 —${when}</div></div>`;
+    return `<div class="pb"><div class="pb-label"><span>可用 不限量</span><span>已用 ${used}</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--ok)"></div></div><div class="pb-meta">剩余 不限量 · 已用 ${used} · 额度池 不限量${when}</div></div>`;
   }
   const size=c.total_size||(remain+used);
   const total=size>0?size:(remain+used);
@@ -400,7 +394,7 @@ async function saveConfig(idx, btn){
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
   const ci=a.checkin||{}, cr=a.credits;
-  const exhausted=!!a.exhausted||(!!cr&&(cr.total_remain||0)===0&&((cr.total_used||0)>0||(cr.total_size||0)>0||(cr.packages&&cr.packages.length)));
+  const exhausted=!!a.exhausted||(!!cr&&!cr.unlimited&&(cr.total_remain||0)===0&&((cr.total_used||0)>0||(cr.total_size||0)>0||(cr.packages&&cr.packages.length)));
   const region=a.region||"cn";
   const isGlobal=region==="global";
   const disabled=!!a.disabled;
@@ -555,7 +549,7 @@ function updateFilterCounts(accounts){
   let cn=0, gl=0, ex=0;
   (accounts||[]).forEach(a=>{
     if((a.region||"cn")==="global") gl++; else cn++;
-    if(a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
+    if(a.exhausted||(a.credits&&!a.credits.unlimited&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
   });
   const elAll=document.getElementById("cntAll");
   const elCn=document.getElementById("cntCn");
@@ -570,19 +564,20 @@ function accountsForFilter(accounts){
   const list=accounts||[];
   if(currentFilter==="all") return list;
   if(currentFilter==="exhausted"){
-    return list.filter(a=>a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length))));
+    return list.filter(a=>a.exhausted||(a.credits&&!a.credits.unlimited&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length))));
   }
   return list.filter(a=>(a.region||"cn")===currentFilter);
 }
 function creditOf(a){
   const cr=a&&a.credits;
-  if(!cr) return {remain:0, used:0, size:0, known:false};
+  if(!cr) return {remain:0, used:0, size:0, known:false, unlimited:false};
   const remain=Number(cr.total_remain)||0;
   const used=Number(cr.total_used)||0;
   const size=Number(cr.total_size)||0;
-  // known if we have any usage signal, size, or packages
-  const known=remain>0||used>0||size>0||(Array.isArray(cr.packages)&&cr.packages.length>0);
-  return {remain, used, size, known};
+  const unlimited=!!cr.unlimited;
+  // known if we have any usage signal, size, packages, or an unlimited plan
+  const known=unlimited||remain>0||used>0||size>0||(Array.isArray(cr.packages)&&cr.packages.length>0);
+  return {remain, used, size, known, unlimited};
 }
 function renderSummary(accounts){
   const box=document.getElementById("summaryBox");
@@ -594,19 +589,21 @@ function renderSummary(accounts){
     return;
   }
   const scoped=accountsForFilter(all);
-  let remain=0, used=0, size=0, knownN=0, disabledN=0, exhaustedN=0;
+  let remain=0, used=0, size=0, knownN=0, disabledN=0, exhaustedN=0, unlimitedN=0;
   let cnRemain=0, cnUsed=0, glRemain=0, glUsed=0;
   scoped.forEach(a=>{
     const c=creditOf(a);
     if(c.known){ remain+=c.remain; used+=c.used; size+=c.size; knownN++; }
+    if(c.unlimited) unlimitedN++;
     if(a.disabled) disabledN++;
-    if(a.exhausted||(c.known&&c.remain===0&&(c.used>0||c.size>0))) exhaustedN++;
+    if(a.exhausted||(c.known&&!c.unlimited&&c.remain===0&&(c.used>0||c.size>0))) exhaustedN++;
   });
-  let allRemain=0, allUsed=0, allSize=0;
+  let allRemain=0, allUsed=0, allSize=0, allUnlimitedN=0;
   all.forEach(a=>{
     const c=creditOf(a);
     if(!c.known) return;
     allRemain+=c.remain; allUsed+=c.used; allSize+=c.size;
+    if(c.unlimited) allUnlimitedN++;
     if((a.region||"cn")==="global"){ glRemain+=c.remain; glUsed+=c.used; }
     else { cnRemain+=c.remain; cnUsed+=c.used; }
   });
@@ -615,27 +612,31 @@ function renderSummary(accounts){
   let barColor="var(--ok)"; if(pct>60)barColor="var(--warn)"; if(pct>85)barColor="var(--err)";
   const scopeLabel=currentFilter==="all"?"全部账号":(currentFilter==="global"?"Global 账号":"CN 账号");
   const allTotal=allSize>0?allSize:(allRemain+allUsed);
+  // Unlimited accounts have no finite pool — surface 不限量 instead of bogus 0s.
+  const remainDisp=unlimitedN>0?"不限量":String(remain);
+  const totalDisp=unlimitedN>0?"不限量":(total?String(total):"-");
+  const pctDisp=unlimitedN>0?"-":(total?pct+"%":"-");
   box.style.display="block";
   box.innerHTML=`
     <div class="summary-hd">
       <div class="summary-title">用量汇总 · ${esc(scopeLabel)}</div>
-      <div class="summary-meta">${scoped.length} 个账号 · 有数据 ${knownN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
+      <div class="summary-meta">${scoped.length} 个账号 · 有数据 ${knownN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}${unlimitedN?` · 不限量 ${unlimitedN}`:""}</div>
     </div>
     <div class="summary-grid">
-      <div class="summary-item"><div class="k">剩余(可用)</div><div class="v ok">${remain}</div></div>
+      <div class="summary-item"><div class="k">剩余(可用)</div><div class="v ok">${remainDisp}</div></div>
       <div class="summary-item"><div class="k">已用(消耗)</div><div class="v ${pct>85?"err":(pct>60?"warn":"")}">${used}</div></div>
-      <div class="summary-item"><div class="k">额度池</div><div class="v">${total||"-"}</div></div>
-      <div class="summary-item"><div class="k">消耗占比</div><div class="v ${pct>85?"err":(pct>60?"warn":"ok")}">${total?pct+"%":"-"}</div></div>
+      <div class="summary-item"><div class="k">额度池</div><div class="v">${totalDisp}</div></div>
+      <div class="summary-item"><div class="k">消耗占比</div><div class="v ${pct>85?"err":(pct>60?"warn":"ok")}">${pctDisp}</div></div>
     </div>
     <div class="pb">
-      <div class="pb-label"><span>消耗进度（已用/额度池）</span><span>${total?pct+"%":"-"}</span></div>
-      <div class="pb-track"><div class="pb-bar" style="width:${total?pct:0}%;background:${barColor}"></div></div>
-      <div class="pb-meta">可用 ${remain} · 已用 ${used} · 池 ${total||0}（签到加包会抬高池和可用，不等于没消耗）</div>
+      <div class="pb-label"><span>消耗进度（已用/额度池）</span><span>${pctDisp}</span></div>
+      <div class="pb-track"><div class="pb-bar" style="width:${unlimitedN>0?0:pct}%;background:${barColor}"></div></div>
+      <div class="pb-meta">可用 ${remainDisp} · 已用 ${used} · 池 ${unlimitedN>0?"不限量":(total||0)}（签到加包会抬高池和可用，不等于没消耗）</div>
     </div>
     ${currentFilter==="all"?`
     <div class="pb-meta" style="margin-top:10px">分区域：CN 可用 ${cnRemain} / 已用 ${cnUsed} · Global 可用 ${glRemain} / 已用 ${glUsed}</div>
     `:`
-    <div class="pb-meta" style="margin-top:10px">全部账号池：可用 ${allRemain} · 已用 ${allUsed} · 池 ${allTotal||0}</div>
+    <div class="pb-meta" style="margin-top:10px">全部账号池：可用 ${allUnlimitedN>0?"不限量":allRemain} · 已用 ${allUsed} · 池 ${allUnlimitedN>0?"不限量":(allTotal||0)}</div>
     `}
   `;
 }
@@ -857,7 +858,8 @@ async function refreshCredits(idx, btn){
       if(acct.error) a.error=acct.error; else a.error="";
       updateOneCard(a);
     }
-    const remain=acct&&acct.credits?acct.credits.total_remain:"?";
+    const cr2=acct&&acct.credits;
+    const remain=cr2?(cr2.unlimited?"不限量":cr2.total_remain):"?";
     const who=acct&&acct.nickname?acct.nickname:idx;
     toast("积分已刷新","ok",who+" · 剩余 "+remain);
   }catch(e){

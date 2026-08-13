@@ -121,6 +121,7 @@ func TestIsCreditsExhausted(t *testing.T) {
 		{"remain0 size>0", &creditsSummary{TotalRemain: 0, TotalSize: 100}, true},
 		{"remain0 packages", &creditsSummary{TotalRemain: 0, Packages: []packageSummary{{Name: "x"}}}, true},
 		{"remain0 no data", &creditsSummary{TotalRemain: 0, TotalUsed: 0}, false},
+		{"unlimited never exhausted", &creditsSummary{Unlimited: true, TotalUsed: 500}, false},
 	}
 	for _, tc := range cases {
 		if got := isCreditsExhausted(tc.cr); got != tc.want {

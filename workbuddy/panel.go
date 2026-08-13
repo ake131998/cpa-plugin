@@ -103,13 +103,6 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 			acct.Region = accountRegion(sa)
 			if fetchCredits {
 				plan, ci, cr, errs := cachedAccountDetails(f.ID, sa, force)
-				// Unlimited enterprise pools: estimate used from the persisted
-				// cycle baseline; stash a pending baseline for syncAuthNote.
-				if phys != nil {
-					if extra, dirty := applyCycleBaseline(cr, phys.JSON); dirty && cr != nil {
-						cr.cycleExtra = extra
-					}
-				}
 				acct.Plan = plan
 				acct.Checkin = ci
 				acct.Credits = cr
@@ -208,9 +201,11 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 }
 
 // summarizeCredits aggregates remain/used across dashboard accounts.
+// Unlimited accounts contribute their usage to used and are counted in
+// unlimited_count (their pool is infinite, so they add nothing to size).
 func summarizeCredits(accounts []wbAccount) map[string]any {
 	var remain, used, size, cnRemain, cnUsed, cnSize, glRemain, glUsed, glSize int64
-	var known, disabledN, exhaustedN, packs int
+	var known, disabledN, exhaustedN, packs, unlimitedN int
 	for _, a := range accounts {
 		if a.Disabled {
 			disabledN++
@@ -222,10 +217,13 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 			continue
 		}
 		cr := a.Credits
-		if cr.TotalRemain == 0 && cr.TotalUsed == 0 && cr.TotalSize == 0 && len(cr.Packages) == 0 {
+		if cr.TotalRemain == 0 && cr.TotalUsed == 0 && cr.TotalSize == 0 && len(cr.Packages) == 0 && !cr.Unlimited {
 			continue
 		}
 		known++
+		if cr.Unlimited {
+			unlimitedN++
+		}
 		remain += cr.TotalRemain
 		used += cr.TotalUsed
 		size += cr.TotalSize
@@ -249,6 +247,7 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 		"known_count":     known,
 		"disabled_count":  disabledN,
 		"exhausted_count": exhaustedN,
+		"unlimited_count": unlimitedN,
 		"pack_count":      packs,
 		"total_remain":    remain,
 		"total_used":      used,

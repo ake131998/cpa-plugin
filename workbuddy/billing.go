@@ -353,10 +353,13 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 //	{"credit":94866.03,"limitNum":-1,"cycleStartTime":"2026-07-16 00:00:00",
 //	 "cycleEndTime":"2026-08-15 23:59:59","cycleResetTime":"2026-08-16 00:00:00"}
 //
-// credit is the remaining balance. limitNum == -1 means the cycle pool is
-// unlimited — we leave TotalSize/TotalUsed at 0 and mark the summary
-// Unlimited so the panel renders 已用/额度池 as "—" instead of a
-// misleading 0. A positive limitNum is a finite pool and used = limit − remain.
+// limitNum == -1 means the cycle pool is unlimited (不限量). For unlimited
+// plans credit is the cycle CONSUMPTION (verified against the official
+// console: the value matches 已使用, while 额度上限 shows 不限量) — we record
+// it as TotalUsed and mark the summary Unlimited so the panel renders 不限量
+// and no code path mistakes remain==0 for exhaustion. A positive limitNum is
+// a finite pool: credit is the remaining balance and used = limit − remain.
+// limitNum == 0 keeps the legacy assumption (credit = remain).
 func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
 	data, err := billingCall(sa, "/v2/billing/meter/get-enterprise-user-usage", nil)
 	if err != nil {
@@ -371,70 +374,37 @@ func fetchEnterpriseUsage(sa *storedAuth) (*creditsSummary, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	remain := int64(math.Round(resp.Credit))
-	if remain < 0 {
-		remain = 0
+	credit := int64(math.Round(resp.Credit))
+	if credit < 0 {
+		credit = 0
 	}
-	sum := &creditsSummary{TotalRemain: remain, PackCount: 1}
+	if resp.LimitNum < 0 {
+		// Unlimited pool: no remaining/capacity to report — only consumption.
+		sum := &creditsSummary{TotalUsed: credit, PackCount: 1, Unlimited: true}
+		sum.Packages = []packageSummary{{
+			Name:       "企业套餐（不限量）",
+			Used:       credit,
+			CycleStart: resp.CycleStartTime,
+			CycleEnd:   resp.CycleEndTime,
+		}}
+		return sum, nil
+	}
+	sum := &creditsSummary{TotalRemain: credit, PackCount: 1}
 	if resp.LimitNum > 0 {
 		sum.TotalSize = resp.LimitNum
-		if used := resp.LimitNum - remain; used > 0 {
+		if used := resp.LimitNum - credit; used > 0 {
 			sum.TotalUsed = used
 		}
-	} else {
-		sum.Unlimited = true
 	}
 	sum.Packages = []packageSummary{{
 		Name:       "企业套餐",
-		Remain:     remain,
+		Remain:     credit,
 		Used:       sum.TotalUsed,
 		Size:       sum.TotalSize,
 		CycleStart: resp.CycleStartTime,
 		CycleEnd:   resp.CycleEndTime,
 	}}
 	return sum, nil
-}
-
-// authExtraCycleKey is the auth-file top-level key holding the unlimited-pool
-// cycle baseline: {"start": "<cycleStartTime>", "credit": <balance at first
-// observation>}. Persisted via the normal auth rewrite path (syncAuthNote) so
-// the baseline survives plugin restarts.
-const authExtraCycleKey = "wb_cycle"
-
-// applyCycleBaseline fills TotalUsed for unlimited enterprise pools (upstream
-// sends no used field) from a cycle-start credit baseline kept in the auth
-// file extras. Stateless: re-derived from physJSON on every call. When the
-// stored baseline is missing, belongs to an older cycle, or sits below the
-// current balance (mid-cycle top-up), the current balance becomes the new
-// baseline and the caller should persist the returned extras (dirty=true);
-// used then reads as 0 for that round and grows as the balance drops. Top-ups
-// re-baseline, so the figure is a lower bound on true consumption.
-func applyCycleBaseline(cr *creditsSummary, physJSON []byte) (map[string]any, bool) {
-	if cr == nil || !cr.Unlimited || len(cr.Packages) == 0 {
-		return nil, false
-	}
-	start := strings.TrimSpace(cr.Packages[0].CycleStart)
-	if start == "" {
-		return nil, false
-	}
-	cur := cr.TotalRemain
-	base := int64(-1)
-	if len(physJSON) > 0 {
-		var doc struct {
-			Cycle struct {
-				Start  string  `json:"start"`
-				Credit float64 `json:"credit"`
-			} `json:"wb_cycle"`
-		}
-		if json.Unmarshal(physJSON, &doc) == nil && doc.Cycle.Start == start {
-			base = int64(math.Round(doc.Cycle.Credit))
-		}
-	}
-	if base < cur {
-		return map[string]any{"start": start, "credit": cur}, true
-	}
-	cr.TotalUsed = base - cur
-	return map[string]any{"start": start, "credit": base}, false
 }
 
 func fetchPaymentType(sa *storedAuth) string {
@@ -531,9 +501,13 @@ func hasTrialPack(cr *creditsSummary) bool {
 
 // isCreditsExhausted is the shared "耗尽" definition for panel + scheduler.
 // Exhausted = we have usage signal and no remaining credits.
-// Missing credits data is NOT exhausted (unknown).
+// Missing credits data is NOT exhausted (unknown); an unlimited plan is
+// never exhausted (remain stays 0 by definition).
 func isCreditsExhausted(cr *creditsSummary) bool {
 	if cr == nil {
+		return false
+	}
+	if cr.Unlimited {
 		return false
 	}
 	if cr.TotalRemain > 0 {

@@ -1,25 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.8.7
 
-### Enterprise unlimited pool: honest + locally estimated "used"
+### Enterprise unlimited plan (不限量) credits semantics
 
-Enterprise accounts with `limitNum=-1` (unlimited cycle pool) have no used
-field on the `get-enterprise-user-usage` wire — the panel previously showed a
-misleading 已用 0 · 0%.
+Production bug: for enterprise accounts whose cycle pool is unlimited
+(`limitNum == -1`), the enterprise usage endpoint's `credit` field is the
+cycle **consumption**, not a remaining balance. The plugin recorded it as
+`TotalRemain`, so the panel's 积分用量卡片 and 用量汇总 showed your 已使用 as
+“剩余额度”, while 额度池 had no meaningful value (the real cap is 不限量).
+Worse, any naive fix that zeroed remain would have tripped the
+exhausted-account automation.
 
-- `management.go` — `creditsSummary.Unlimited` marks the unlimited pool; the
-  panel renders 已用/额度池 as "—" instead of 0 (`panel.html` `progressHTML`),
-  and the auth note shows `已用— 不限量池` (`policy.go` `displayNote`).
-- `billing.go` — new `applyCycleBaseline`: estimates cycle used as
-  `baseline credit − current credit`. The baseline lives in the auth file's
-  top-level `wb_cycle` key (added to the `authFileExtraKeys` rewrite
-  whitelist in `authfile.go`), is re-derived statelessly on every fetch, and
-  re-baselines on cycle rollover or mid-cycle top-up (so the figure is a
-  lower bound on true consumption). Pending baselines are persisted through
-  the existing throttled `syncAuthNote` rewrite (`lifecycle.go`); both fresh
-  credits paths (`panel.go` dashboard, `credits_handler.go` single-account
-  query) apply the estimate.
+- `management.go` — `creditsSummary` gains `Unlimited bool`
+  (`unlimited` in JSON): no cycle cap; remain/size stay 0 by definition and
+  `TotalUsed` carries the cycle consumption.
+- `billing.go` — `fetchEnterpriseUsage`: `limitNum < 0` → `Unlimited=true`,
+  `credit` recorded as `TotalUsed`, package named 企业套餐（不限量）;
+  `limitNum > 0` keeps credit-as-remain (used = limit − remain);
+  `limitNum == 0` keeps the legacy assumption. `isCreditsExhausted` never
+  reports an unlimited plan as exhausted.
+- `policy.go` — `shouldReenableCN` treats unlimited as having credits;
+  `displayNote` renders “不限量 · 已用N”.
+- `panel.go` — `summarizeCredits` counts unlimited accounts
+  (`unlimited_count`) and never skips them as “no data”.
+- `panel.html` — usage card renders “可用 不限量 · 已用 N · 额度池 不限量”;
+  用量汇总 shows 剩余/额度池 as 不限量 when the scope contains an unlimited
+  account; all exhausted-detection expressions skip unlimited accounts (they
+  have remain=0 by definition); the refresh toast prints 剩余 不限量.
 
 ### Security: upstream response dump removed
 

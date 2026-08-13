@@ -135,6 +135,10 @@ func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
 	if isCreditsExhausted(cr) {
 		return false
 	}
+	// Unlimited plans always have spendable quota.
+	if cr.Unlimited {
+		return true
+	}
 	// Known positive remain, or non-exhausted with packages still having room.
 	return cr.TotalRemain > 0
 }
@@ -156,18 +160,12 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 		parts = append(parts, "积分未知")
 	case isCreditsExhausted(cr):
 		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
+	case cr.Unlimited:
+		parts = append(parts, fmt.Sprintf("不限量 · 已用%d", cr.TotalUsed))
 	default:
 		// Show remain as primary (what you can still spend). Used is real cycle spend.
 		// Size (capacity) grows with check-in packs — do not treat size↑ as usage↓.
-		// Unlimited enterprise pools carry no used field upstream — show the
-		// local estimate when one exists, "—" otherwise.
-		if cr.Unlimited {
-			if cr.TotalUsed > 0 {
-				parts = append(parts, fmt.Sprintf("余%d 已用约%d 不限量池", cr.TotalRemain, cr.TotalUsed))
-			} else {
-				parts = append(parts, fmt.Sprintf("余%d 已用— 不限量池", cr.TotalRemain))
-			}
-		} else if cr.TotalSize > 0 {
+		if cr.TotalSize > 0 {
 			parts = append(parts, fmt.Sprintf("余%d 已用%d 池%d", cr.TotalRemain, cr.TotalUsed, cr.TotalSize))
 		} else {
 			parts = append(parts, fmt.Sprintf("余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
