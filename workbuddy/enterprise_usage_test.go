@@ -27,7 +27,10 @@ func enterpriseBillingServer(t *testing.T, entBody, personalBody string) *httpte
 // TestFetchUserResource_EnterpriseUnlimited reproduces the 2026-08 production
 // bug: enterprise accounts get an empty Accounts list from get-user-resource
 // (panel usage card showed all zeros) while their real balance lives under
-// get-enterprise-user-usage. limitNum=-1 means unlimited → size stays 0.
+// get-enterprise-user-usage. limitNum=-1 means unlimited (不限量): credit is
+// the cycle CONSUMPTION (matches 已使用 in the official console), recorded as
+// TotalUsed with the Unlimited flag — never as remain, which both mislabeled
+// usage as 剩余额度 and (via remain=0) risked a false 耗尽/exhausted verdict.
 func TestFetchUserResource_EnterpriseUnlimited(t *testing.T) {
 	srv := enterpriseBillingServer(t,
 		`{"code":0,"msg":"OK","data":{"credit":94866.03,"limitNum":-1,"cycleStartTime":"2026-07-16 00:00:00","cycleEndTime":"2026-08-15 23:59:59","cycleResetTime":"2026-08-16 00:00:00"}}`,
@@ -43,13 +46,19 @@ func TestFetchUserResource_EnterpriseUnlimited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchUserResource: %v", err)
 	}
-	if sum.TotalRemain != 94866 {
-		t.Fatalf("remain=%d want 94866", sum.TotalRemain)
+	if !sum.Unlimited {
+		t.Fatal("limitNum=-1 must mark the summary Unlimited")
 	}
-	if sum.TotalSize != 0 || sum.TotalUsed != 0 {
-		t.Fatalf("unlimited pool must keep size/used at 0, got size=%d used=%d", sum.TotalSize, sum.TotalUsed)
+	if sum.TotalUsed != 94866 {
+		t.Fatalf("used=%d want 94866 (credit is consumption for unlimited plans)", sum.TotalUsed)
 	}
-	if len(sum.Packages) != 1 || sum.Packages[0].CycleEnd != "2026-08-15 23:59:59" {
+	if sum.TotalRemain != 0 || sum.TotalSize != 0 {
+		t.Fatalf("unlimited pool must keep remain/size at 0, got remain=%d size=%d", sum.TotalRemain, sum.TotalSize)
+	}
+	if isCreditsExhausted(sum) {
+		t.Fatal("unlimited plan must never be exhausted despite remain=0")
+	}
+	if len(sum.Packages) != 1 || sum.Packages[0].Used != 94866 || sum.Packages[0].CycleEnd != "2026-08-15 23:59:59" {
 		t.Fatalf("packages=%+v", sum.Packages)
 	}
 }

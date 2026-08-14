@@ -135,6 +135,10 @@ func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
 	if isCreditsExhausted(cr) {
 		return false
 	}
+	// Unlimited plans always have spendable quota.
+	if cr.Unlimited {
+		return true
+	}
 	// Known positive remain, or non-exhausted with packages still having room.
 	return cr.TotalRemain > 0
 }
@@ -156,6 +160,8 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 		parts = append(parts, "积分未知")
 	case isCreditsExhausted(cr):
 		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
+	case cr.Unlimited:
+		parts = append(parts, fmt.Sprintf("不限量 · 已用%d", cr.TotalUsed))
 	default:
 		// Show remain as primary (what you can still spend). Used is real cycle spend.
 		// Size (capacity) grows with check-in packs — do not treat size↑ as usage↓.

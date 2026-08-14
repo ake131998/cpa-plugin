@@ -262,8 +262,8 @@ func handleEnterpriseModelsStatus() map[string]any {
 	}
 	resp := buildEnterpriseModelsStatus(accounts)
 	// Diagnostics: when the refresh loop has never run (or the account list
-	// changed), surface why — a missing WB_UPSTREAM_DUMP_DIR and an empty
-	// last_refresh_at usually mean "no account had an enterpriseId yet".
+	// changed), surface why — an empty last_refresh_at usually means "no
+	// account had an enterpriseId yet".
 	enterpriseRefreshStateMu.RLock()
 	lastRun := enterpriseRefreshState.lastRun
 	accounted := enterpriseRefreshState.accounted
@@ -279,7 +279,6 @@ func handleEnterpriseModelsStatus() map[string]any {
 		resp["last_refresh_failed"] = failed
 		resp["last_refresh_skipped"] = skipped
 	}
-	resp["dump_dir"] = loadedUpstreamDumpDir()
 	return resp
 }
 

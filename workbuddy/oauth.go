@@ -278,10 +278,6 @@ func enrichAccountFromUpstream(accessToken string) (enterpriseID, uid, nickname 
 		req.Header.Set("Referer", origin+"/")
 		req.Header.Set("User-Agent", clientUA)
 		if resp, herr := hostHTTPDo(req); herr == nil {
-			// Debug mirror: whether the stateless login/account endpoint is
-			// usable is unverifiable via curl (OAuth bearer required); dump the
-			// raw response when WB_UPSTREAM_DUMP_DIR is set.
-			dumpUpstreamResponse("account_info", http.MethodGet, acctURL, resp.StatusCode, resp.Body)
 			if resp.StatusCode == http.StatusOK {
 				var acct accountData
 				if json.Unmarshal(resp.Body, &acct) == nil {

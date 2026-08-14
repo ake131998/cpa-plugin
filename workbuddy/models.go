@@ -261,10 +261,6 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 		return nil, err
 	}
 	body := resp.Body
-	// Debug mirror: the personal models response shape is non-contractual and
-	// unverifiable via curl (OAuth bearer required), so the raw body is dumped
-	// under the same mechanism as the enterprise list.
-	dumpUpstreamResponse("personal_models", http.MethodGet, modelsURL, resp.StatusCode, body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models API status %d", resp.StatusCode)
 	}
@@ -373,10 +369,6 @@ func callEnterpriseModelsAPI(accessToken, enterpriseID, userID, domain string) (
 	if err != nil {
 		return nil, err
 	}
-	// Debug mirror: the config/models response shape is non-contractual and
-	// unverifiable via curl (needs an OAuth bearer), so the raw body is
-	// dumped when WB_UPSTREAM_DUMP_DIR is set.
-	dumpUpstreamResponse("enterprise_models_"+enterpriseID, http.MethodGet, modelsURL, resp.StatusCode, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("enterprise models API status %d", resp.StatusCode)
 	}

@@ -36,6 +36,9 @@ type creditsSummary struct {
 	TotalUsed int64 `json:"total_used"`
 	// TotalSize is the credit capacity/pool (sum of package sizes). remain+used ≈ size.
 	TotalSize int64 `json:"total_size"`
+	// Unlimited marks an enterprise plan with no cycle cap (limitNum=-1).
+	// Remain/Size stay 0 by definition; TotalUsed carries the cycle consumption.
+	Unlimited bool `json:"unlimited,omitempty"`
 	// PackCount is number of resource packages included in the aggregate.
 	PackCount int `json:"pack_count"`
 	// FetchedAt is when this snapshot was taken (RFC3339). Upstream billing lag
