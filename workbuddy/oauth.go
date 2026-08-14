@@ -158,9 +158,20 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 		},
 	}
 	loginStates.Delete(state)
+	ad := toAuthData(sa)
+	// Re-login replaces the credential file wholesale (the host persists
+	// StorageJSON+Metadata, same as refresh), so carry over any per-credential
+	// config the already-registered file for this uid holds — otherwise every
+	// re-login silently wipes the user's priority/aliases/excluded_models.
+	if extras := lookupExistingAuthConfigExtras(sa); len(extras) > 0 {
+		relayAuthConfigExtras(ad.Metadata, extras)
+		if prefix, ok := extras["prefix"].(string); ok && prefix != "" {
+			ad.Prefix = prefix
+		}
+	}
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,
-		Auth:   toAuthData(sa),
+		Auth:   ad,
 	})
 }
 
@@ -218,7 +229,17 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 	// refreshed credential itself after Refresh returns (conductor.go
 	// refreshAuth → m.Update → persist). Writing from the plugin too would
 	// double-write the file.
-	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: toAuthDataForRefresh(sa)})
+	//
+	// That host persist rewrites the file as StorageJSON+Metadata
+	// (FileTokenStore.Save → mergedStorageJSON), so the response Metadata must
+	// carry the per-credential config (priority/model_aliases/excluded_models/
+	// prefix) or the host wipes those keys from the file on every refresh —
+	// the exact "aliases/filters don't persist" bug. req.Metadata is the
+	// in-memory auth's metadata, which ParseAuth already populated from the
+	// file; relay the whitelisted keys through (see authConfigMetadataKeys).
+	ad := toAuthDataForRefresh(sa)
+	relayAuthConfigExtras(ad.Metadata, req.Metadata)
+	return okEnvelope(pluginapi.AuthRefreshResponse{Auth: ad})
 }
 
 // enrichAccountFromUpstream best-effort re-fetches account identity

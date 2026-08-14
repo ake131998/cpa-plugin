@@ -245,6 +245,117 @@ func readAuthFileExtras(raw []byte) map[string]any {
 	return out
 }
 
+// authConfigMetadataKeys are the snake-spelled per-credential config keys the
+// plugin relays through AuthData.Metadata. This is what makes the config
+// survive CPA's OWN persist path: on every token refresh the host rewrites
+// the auth file itself (conductor refreshAuth → Manager.Update → persist →
+// FileTokenStore.Save → pluginTokenStorage.SaveTokenToFile →
+// mergedStorageJSON), and the file it writes is the plugin's StorageJSON
+// merged with the in-memory auth's Metadata — nothing else. Keys the plugin
+// never puts into Metadata (model_aliases / excluded_models / prefix before
+// this relay existed) were silently wiped from the file on each refresh, and
+// the watcher then re-synthesized an auth record without the corresponding
+// routing attributes — configured filters/aliases "worked" until the next
+// refresh and then vanished. Relaying them via Metadata keeps them in the
+// in-memory record, so every host persist carries them back into the file.
+var authConfigMetadataKeys = []string{
+	"priority",
+	"model_aliases",
+	"excluded_models",
+	"prefix",
+}
+
+// parseAuthFilePrefix reads the top-level "prefix" key (string), mirroring
+// the host synthesizer's non-plugin path. ok=false when absent/empty.
+func parseAuthFilePrefix(raw []byte) (string, bool) {
+	var doc struct {
+		Prefix string `json:"prefix"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return "", false
+	}
+	p := strings.TrimSpace(doc.Prefix)
+	return p, p != ""
+}
+
+// relayAuthConfigExtras copies the whitelisted per-credential config keys
+// (authConfigMetadataKeys, snake spelling) from src into dst, so a
+// ParseAuth/RefreshAuth response carries the same config the file currently
+// holds. Keys absent from src are left untouched in dst (the host treats a
+// missing Metadata key as "drop from file on next persist", which is the
+// correct behavior for a cleared config). dst must be non-nil.
+func relayAuthConfigExtras(dst, src map[string]any) {
+	if dst == nil || len(src) == 0 {
+		return
+	}
+	for _, k := range authConfigMetadataKeys {
+		if v, ok := src[k]; ok && v != nil {
+			dst[k] = v
+		}
+	}
+}
+
+// authConfigExtrasMetadata extracts the per-credential config from raw auth
+// file JSON as a snake-keyed Metadata fragment (priority / model_aliases /
+// excluded_models / prefix) ready for relay into AuthData.Metadata. Kebab
+// spellings are normalized to snake. Returns nil when the file carries no
+// config.
+func authConfigExtrasMetadata(raw []byte) map[string]any {
+	var out map[string]any
+	put := func(k string, v any) {
+		if out == nil {
+			out = make(map[string]any, len(authConfigMetadataKeys))
+		}
+		out[k] = v
+	}
+	priority, aliases, excluded := parseAuthFileConfig(raw)
+	if priority != nil {
+		put("priority", *priority)
+	}
+	if len(aliases) > 0 {
+		put("model_aliases", aliases)
+	}
+	if len(excluded) > 0 {
+		put("excluded_models", excluded)
+	}
+	if prefix, ok := parseAuthFilePrefix(raw); ok {
+		put("prefix", prefix)
+	}
+	return out
+}
+
+// lookupExistingAuthConfigExtras finds an already-registered auth file for
+// the same account uid and returns its per-credential config as a
+// snake-keyed Metadata fragment (authConfigExtrasMetadata). Used by the
+// login flow so re-login doesn't wipe the user's config. Returns nil for new
+// accounts, when the host is unavailable, or when the lookup fails — login
+// must never fail just because config preservation couldn't run.
+func lookupExistingAuthConfigExtras(sa *storedAuth) map[string]any {
+	uid := ""
+	if sa != nil {
+		uid = strings.TrimSpace(sa.Account.UID)
+	}
+	if uid == "" {
+		return nil
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return nil
+	}
+	wantName := authFileNameFor(sa)
+	for _, f := range files {
+		if !listEntryMatchesUID(f, uid, wantName) {
+			continue
+		}
+		phys, err := hostAuthGetPhysical(f.AuthIndex)
+		if err != nil || phys == nil {
+			return nil
+		}
+		return authConfigExtrasMetadata(phys.JSON)
+	}
+	return nil
+}
+
 // parseAuthFilePriority reads the top-level "priority" key the way the host
 // does (number or numeric string; synthesizer/file.go). ok=false when absent
 // or unparseable — callers treat that as priority 0 without writing anything.
