@@ -2,6 +2,41 @@
 
 ## 0.8.7
 
+### Fix: per-credential config no longer wiped by CPA's own auth-file persist
+
+0.8.6 made the plugin's own rewrites preserve `priority` / `model_aliases` /
+`excluded_models` / `prefix`, but one overwrite path remained: **CPA itself**
+rewrites the auth file on every host-driven token refresh (conductor
+`refreshAuth` → `Manager.Update` → `persist` → `FileTokenStore.Save` →
+`pluginTokenStorage.SaveTokenToFile` → `mergedStorageJSON`). The file it
+writes is the plugin's `StorageJSON` merged with the in-memory auth's
+`Metadata` — and the plugin only ever put `type/provider/logo/note/disabled`
+(plus `priority` at parse time) into `Metadata`. Result: configured aliases
+and excluded models worked until the next token refresh, then CPA rewrote
+the file without them, the watcher re-synthesized an auth record without the
+routing attributes, and the panel showed the config as empty.
+
+The fix relays the full per-credential config through `AuthData.Metadata`,
+which is exactly what the host merges back into the file on every persist:
+
+- `authfile.go` — new `authConfigMetadataKeys` whitelist,
+  `authConfigExtrasMetadata` (file JSON → snake-keyed Metadata fragment,
+  kebab spellings normalized), `relayAuthConfigExtras` (whitelisted copy
+  between Metadata maps), and `parseAuthFilePrefix`.
+- `main.go` — `handleParseAuth` now relays `model_aliases` /
+  `excluded_models` / `prefix` (in addition to `priority`) from the physical
+  file into `AuthData.Metadata`, so the in-memory auth record carries the
+  config; `AuthData.Prefix` is populated too (the host reads prefix from
+  `AuthData`, not Metadata).
+- `oauth.go` — `handleRefreshAuth` relays the whitelisted keys from the
+  refresh request's `Metadata` (the in-memory record ParseAuth populated)
+  into the refresh response, so the host's post-refresh persist keeps them
+  in the file. `handlePollLogin` carries an existing same-uid file's config
+  over a re-login (`lookupExistingAuthConfigExtras`) instead of wiping it.
+- Clearing a key via `/accounts/config` (explicit `null`) still clears it
+  for good: the key disappears from the file, the next parse stops relaying
+  it, and the next persist drops it as intended.
+
 ### Enterprise unlimited plan (不限量) credits semantics
 
 Production bug: for enterprise accounts whose cycle pool is unlimited
